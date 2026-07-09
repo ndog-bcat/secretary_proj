@@ -1,0 +1,1 @@
+# audio_process.py/text_process.py에서 받아온 DB 쿼리 결과를 처리하는 서비스
