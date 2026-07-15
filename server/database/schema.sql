@@ -6,6 +6,7 @@ USE meeting_DB;
 DROP TABLE IF EXISTS Nickname;
 DROP TABLE IF EXISTS To_meet;
 DROP TABLE IF EXISTS Schedule;
+DROP TABLE IF EXISTS Routine;
 DROP TABLE IF EXISTS Friend;
 DROP TABLE IF EXISTS User;
 
@@ -25,6 +26,7 @@ CREATE TABLE Friend (
     FOREIGN KEY (User_ID) REFERENCES User(ID) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
+-- 4-1. Nickname (별명) 테이블
 CREATE TABLE Nickname (
     nickname VARCHAR(50) NOT NULL,
     Friend_ID INT NOT NULL,
@@ -44,7 +46,20 @@ CREATE TABLE Schedule (
     FOREIGN KEY (User_ID) REFERENCES User(ID) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
--- 6. To_meet (일정-지인 매핑 테이블, N:M 관계 해소)
+-- 6. Routine (반복 일정) 테이블
+CREATE TABLE Routine (
+    Routine_ID INT NOT NULL AUTO_INCREMENT,
+    User_ID VARCHAR(50) NOT NULL,
+    business VARCHAR(255) NOT NULL,    -- 반복 일정 내용 (예: 매주 월요일 스벅에서 커피)
+    day_of_week TINYINT NOT NULL,               -- 요일 (0=일요일, 1=월요일, ..., 6=토요일)
+    start_time TIME NOT NULL,          -- 반복 일정 시작 시간
+    end_time TIME DEFAULT NULL,        -- 반복 일정 종료 시간
+    location VARCHAR(255) DEFAULT NULL, -- 반복 일정 장소
+    PRIMARY KEY (Routine_ID),
+    FOREIGN KEY (User_ID) REFERENCES User(ID) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- 7. To_meet (일정-지인 매핑 테이블, N:M 관계 해소)
 CREATE TABLE To_meet (
     Schedule_ID INT NOT NULL,
     Friend_ID INT NOT NULL,
