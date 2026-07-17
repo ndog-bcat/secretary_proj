@@ -1,8 +1,28 @@
+import asyncio
 from fastapi import FastAPI, UploadFile, Form, File
 from contextlib import asynccontextmanager
 from datetime import datetime
 from service import audio_process, db_process, text_process
 from database.connection import init_db_pool, close_db_pool
+from service.db_process import cleanup_expired_data
+
+async def schedule_cleanup_task():
+    """서버가 켜져 있는 동안 무한히 돌며 12시간마다 DB를 청소하는 백그라운드 루프"""
+    while True:
+        try:
+            # 12시간 대기 (초 단위 계산: 12 * 60 * 60)
+            await asyncio.sleep(43200) 
+            
+            print("🧹 DB 정기 청소를 시작합니다...")
+            result = await cleanup_expired_data()
+            if result["status"] == "success":
+                print(f"✅ 청소 완료: 일정 {result['deleted_schedules']}개, 루틴 {result['deleted_routines']}개 삭제됨.")
+            else:
+                print(f"❌ 청소 실패: {result['message']}")
+                
+        except asyncio.CancelledError:
+            # 서버 종료 시 안전하게 백그라운드 루프 종료
+            break
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):

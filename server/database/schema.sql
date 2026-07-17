@@ -54,6 +54,7 @@ CREATE TABLE Routine (
     day_of_week TINYINT NOT NULL,               -- 요일 (0=일요일, 1=월요일, ..., 6=토요일)
     start_time TIME NOT NULL,          -- 반복 일정 시작 시간
     end_time TIME DEFAULT NULL,        -- 반복 일정 종료 시간
+    end_date DATE DEFAULT NULL,         -- 반복 일정 종료 날짜 (NULL이면 무기한)
     location VARCHAR(255) DEFAULT NULL, -- 반복 일정 장소
     PRIMARY KEY (Routine_ID),
     FOREIGN KEY (User_ID) REFERENCES User(ID) ON DELETE CASCADE
