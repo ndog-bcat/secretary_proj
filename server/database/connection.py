@@ -10,7 +10,7 @@ DB_CONFIG = {
     "user": "root",
     "password": os.getenv("DB_PASSWORD"),
     "db": "meeting_DB",
-    "autocommit": True
+    "autocommit": False
 }
 
 db_pool = None

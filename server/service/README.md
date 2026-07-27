@@ -4,47 +4,44 @@
 
 ## 모듈 설명
 ### db_process.py
-- 데이터베이스 접근과 일정 관련 비즈니스 로직을 담당합니다.
+- 데이터베이스 접근과 검증 완료된 일정 CRUD를 담당합니다.
+- 충돌 검사와 자연어 기반 튜플 타겟팅은 앞단 파이프라인에서 처리합니다.
+- INSERT와 UPDATE에서 전달되지 않은 선택 인자는 SQL NULL로 저장합니다.
 
-0. select_flexible_schedule: 유동적 시점 기반 남은 일정 타임라인 조회
-- 받을 인자(args):
-  - start_time: 선택, 시작 시점. 없으면 현재 시간 사용
-  - end_time: 선택, 종료 시점. 없으면 당일 23:59:59로 자동 설정
+#### 쿼리 유형
 
-1. select_integrated_schedule: 특정 날짜 캘린더 전용 하루 전체 통합 조회
-- 받을 인자(args):
-  - target_date: 필수, 조회할 날짜 (예: 2026-07-20)
+0. 특정 일자의 전체 일정과 루틴 조회
+- `target_date`: 필수, `YYYY-MM-DD`
+- 해당 날짜와 겹치는 전날 시작 일정·루틴도 포함
 
-2. insert_schedule: 단발성 일정 삽입
-- 받을 인자(args):
-  - start_time: 필수, 일정 시작 시간
-  - end_time: 선택, 일정 종료 시간
-  - location: 선택, 장소
-  - business: 필수, 일정 내용
-  - who: 선택, 친구/지인 이름 리스트
+1. 특정 기간의 전체 일정과 루틴 조회
+- `start_time`: 선택. 없으면 쿼리 요청 시점
+- `end_time`: 선택. 없으면 쿼리 요청일 다음 날 `00:00:00`
+- 조회 범위는 `[start_time, end_time)`의 반열린 구간
 
-3. insert_routine: 반복 일정 삽입
-- 받을 인자(args):
-  - start_time: 필수, 반복 일정 시작 시간
-  - end_time: 선택, 반복 일정 종료 시간
-  - location: 선택, 장소
-  - business: 필수, 반복 일정 내용
-  - day_of_week: 필수, 요일 (0=일요일, 1=월요일, ..., 6=토요일)
-  - end_date: 선택, 반복 종료 날짜
+2. 충돌 검사가 끝난 일정 삽입
+- 필수: `start_time`, `business`
+- 선택: `end_time`, `location`, `who`
 
-4. update_schedule: 단발성 일정 수정
-- 받을 인자(args):
-  - schedule_id: 필수, 수정할 일정 ID
-  - start_time: 필수, 새 시작 시간
-  - end_time: 선택, 새 종료 시간
-  - location: 선택, 새 장소
-  - business: 필수, 새 일정 내용
+3. 충돌 검사가 끝난 루틴 삽입
+- 필수: `start_time`, `business`, `day_of_week`
+- 선택: `end_time`, `location`, `who`, `start_date`, `end_date`
 
-5. trace_friend: 지인 추적
-- 받을 인자(args):
-  - location: 선택, 장소 단서
-  - business: 선택, 일정 내용 단서
-  - 참고: location 또는 business 중 하나는 있어야 검색이 가능함
+4. 타겟팅과 충돌 검사가 끝난 일정 수정
+- 필수: `schedule_id`, `start_time`, `business`
+- 선택: `end_time`, `location`, `who`
+- 전체 교체 방식이므로 누락된 선택 인자는 NULL로 변경
+
+5. 타겟팅과 충돌 검사가 끝난 루틴 수정
+- 필수: `routine_id`, `start_time`, `business`, `day_of_week`
+- 선택: `end_time`, `location`, `who`, `start_date`, `end_date`
+- 전체 교체 방식이므로 누락된 선택 인자는 NULL로 변경
+
+6. 타겟팅이 끝난 일정 삭제
+- `schedule_id`: 필수
+
+7. 타겟팅이 끝난 루틴 삭제
+- `routine_id`: 필수
 
 ### text_process.py
 - 사용자의 자연어 질문을 분석해 DB 쿼리 인자를 생성하고, DB 결과를 다시 자연어로 변환합니다.
