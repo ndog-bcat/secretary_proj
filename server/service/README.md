@@ -13,24 +13,29 @@
 0. 특정 일자의 전체 일정과 루틴 조회
 - `target_date`: 필수, `YYYY-MM-DD`
 - 해당 날짜와 겹치는 전날 시작 일정·루틴도 포함
+- pending_step: "classification", "waiting_parameters", "completed", "failed"
 
 1. 특정 기간의 전체 일정과 루틴 조회
 - `start_time`: 선택. 없으면 쿼리 요청 시점
 - `end_time`: 선택. 없으면 쿼리 요청일 다음 날 `00:00:00`
 - 조회 범위는 `[start_time, end_time)`의 반열린 구간
+- pending_step: "classification", "waiting_parameters", "completed", "failed"
 
 2. 충돌 검사가 끝난 일정 삽입
 - 필수: `start_time`, `business`
 - 선택: `end_time`, `location`, `who`
+- pending_step: "classification", "waiting_parameters", "waiting_collision_decision", "completed", "failed"
 
 3. 충돌 검사가 끝난 루틴 삽입
 - 필수: `start_time`, `business`, `day_of_week`
 - 선택: `end_time`, `location`, `who`, `start_date`, `end_date`
+- pending_step: "classification", "waiting_parameters", "waiting_collision_decision", "completed", "failed"
 
 4. 타겟팅과 충돌 검사가 끝난 일정 수정
 - 필수: `schedule_id`, `start_time`, `business`
 - 선택: `end_time`, `location`, `who`
 - 전체 교체 방식이므로 누락된 선택 인자는 NULL로 변경
+- pending_step: "classification", "waiting_parameters", "waiting_collision_decision", "completed", "failed"
 
 5. 타겟팅과 충돌 검사가 끝난 루틴 수정
 - 필수: `routine_id`, `start_time`, `business`, `day_of_week`
@@ -60,6 +65,64 @@
 ### text_process.py
 - 사용자의 자연어 질문을 분석해 DB 쿼리 인자를 생성하고, DB 결과를 다시 자연어로 변환합니다.
 - 현재는 Ollama를 통해 LLM 응답을 받아 처리하는 구조입니다.
+#### pending_step
+0. 특정 일자 조회
+classification
+waiting_parameters
+completed
+failed
+
+1. 특정 기간 조회
+classification
+waiting_parameters
+completed
+failed
+
+2. 일정 삽입
+classification
+waiting_parameters
+waiting_collision_decision
+completed
+failed
+
+3. 루틴 삽입
+classification
+waiting_parameters
+waiting_collision_decision
+completed
+failed
+
+4. 일정 수정
+classification
+waiting_to_pick_day
+waiting_target
+waiting_parameters
+waiting_collision_decision
+completed
+failed
+
+5. 루틴 수정
+classification
+waiting_to_pick_weekday
+waiting_target
+waiting_parameters
+waiting_collision_decision
+completed
+failed
+
+6. 일정 삭제
+classification
+waiting_to_pick_day
+waiting_target
+completed
+failed
+
+7. 루틴 삭제
+classification
+waiting_to_pick_weekday
+waiting_target
+completed
+failed
 
 ### audio_process.py
 - 음성 입력을 자연어 텍스트로 변환해주는 파일
