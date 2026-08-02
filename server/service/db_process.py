@@ -442,15 +442,8 @@ async def select_day(conn, user_id: str, args: dict) -> dict:
 
 async def select_range(conn, user_id: str, args: dict) -> dict:
     """1: 입력 범위 또는 요청 시점부터 요청 당일 자정까지 조회합니다."""
-    request_time = datetime.now()
-    start_input = args.get("start_time")
-    end_input = args.get("end_time")
-    start_dt = parse_to_datetime(start_input) if start_input is not None else request_time
-    end_dt = (
-        parse_to_datetime(end_input)
-        if end_input is not None
-        else datetime.combine(request_time.date() + timedelta(days=1), time.min)
-    )
+    start_dt = parse_to_datetime(args["start_time"])
+    end_dt = parse_to_datetime(args["end_time"])
     timeline = await select_timeline(
         conn,
         user_id,

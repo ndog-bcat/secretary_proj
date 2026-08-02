@@ -43,6 +43,20 @@
 7. 타겟팅이 끝난 루틴 삭제
 - `routine_id`: 필수
 
+#### 쿼리 테이블
+- 필수인자는 db_process.py로 넘기는 것에 있어서 필수라는 것. default 표시는 사용자 미입력 가능 및 누락시 프로그램에서 디폴트값을 채워 넘겨야 한다는 의미임.
+- O-->필요, X-->불필요
+|유형|필수 인자|타겟팅|충돌검사|재질문|
+|:---:|:---:|:---:|:---:|:---:|
+|0: 일자 조회|User_ID, target_date|X|X|인자 확인|
+|1: 기간 조회|User_ID, start_time(default), end_time(default)|X|X|X|
+|2: 일정 삽입|User_ID, start_time, business|X|O|충돌 처리, 인자 확인|
+|3: 루틴 삽입|User_ID, start_time, business, day_of_week|X|O|충돌 처리, 인자 확인|
+|4: 일정 수정|타겟팅된 Schedule_ID, 변경값|O|O|타겟팅, 충돌 처리|
+|5: 루틴 수정|타겟팅된 Routine_ID, 변경값|O|O|타겟팅, 충돌 처리|
+|6: 일정 삭제|타겟팅된 Schedule_ID|O|X|타겟팅|
+|7: 루틴 삭제|타겟팅된 Routine_ID|O|X|타겟팅|
+
 ### text_process.py
 - 사용자의 자연어 질문을 분석해 DB 쿼리 인자를 생성하고, DB 결과를 다시 자연어로 변환합니다.
 - 현재는 Ollama를 통해 LLM 응답을 받아 처리하는 구조입니다.

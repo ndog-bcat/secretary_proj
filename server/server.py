@@ -2,7 +2,7 @@ import asyncio
 from fastapi import FastAPI, UploadFile, Form, File
 from contextlib import asynccontextmanager
 from datetime import datetime
-from service import audio_process, db_process, text_process
+from service import audio_process, db_process, text_process, query_context
 from database.connection import init_db_pool, close_db_pool
 from service.db_process import cleanup_expired_data
 
