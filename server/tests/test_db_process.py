@@ -42,6 +42,20 @@ class FakeCursor:
 
     async def execute(self, sql, params=None):
         self.connection.calls.append((sql, params))
+        if (
+            self.connection.fail_on_call is not None
+            and len(self.connection.calls) == self.connection.fail_on_call
+        ):
+            raise RuntimeError("의도한 테스트 DB 오류")
+
+        lastrowid_queue = self.connection.lastrowids.get(sql, [])
+        if lastrowid_queue:
+            self.lastrowid = lastrowid_queue.pop(0)
+
+        rowcount_queue = self.connection.rowcounts.get(sql, [])
+        if rowcount_queue:
+            self.rowcount = rowcount_queue.pop(0)
+
         result_queue = self.connection.results.get(sql, [])
         self.rows = result_queue.pop(0) if result_queue else []
 
@@ -50,10 +64,22 @@ class FakeCursor:
 
 
 class FakeConnection:
-    def __init__(self, *, results=None, lastrowid=0, rowcount=1):
+    def __init__(
+        self,
+        *,
+        results=None,
+        lastrowid=0,
+        rowcount=1,
+        lastrowids=None,
+        rowcounts=None,
+        fail_on_call=None,
+    ):
         self.results = results or {}
         self.lastrowid = lastrowid
         self.rowcount = rowcount
+        self.lastrowids = lastrowids or {}
+        self.rowcounts = rowcounts or {}
+        self.fail_on_call = fail_on_call
         self.calls = []
         self.committed = False
         self.rolled_back = False
@@ -195,33 +221,39 @@ class CrudBindingTests(unittest.IsolatedAsyncioTestCase):
             ),
         )
 
-        routine_conn = FakeConnection(lastrowid=202)
+        routine_conn = FakeConnection(
+            lastrowids={db_process.insert_routine_sql: [202, 203]}
+        )
         routine_result = await db_process.insert_routine(
             routine_conn,
             "user-1",
             {
+                "routine_group_id": "group-1",
                 "start_time": "23:00:00",
                 "end_time": "01:00:00",
                 "business": "야간 운동",
-                "day_of_week": 1,
+                "days_of_week": [4, 2, 2],
                 "start_date": "2026-07-27",
             },
         )
-        self.assertEqual(routine_result["data"]["routine_id"], 202)
+        self.assertEqual(routine_result["data"]["routine_group_id"], "group-1")
+        self.assertEqual(routine_result["data"]["routine_ids"], [202, 203])
         self.assertEqual(
             routine_conn.calls[0][1],
             (
+                "group-1",
                 "user-1",
                 "23:00:00",
                 "01:00:00",
                 None,
                 "야간 운동",
                 None,
-                1,
+                2,
                 "2026-07-27",
                 None,
             ),
         )
+        self.assertEqual(routine_conn.calls[1][1][7], 4)
 
     async def test_update_and_delete_bindings(self):
         schedule_conn = FakeConnection()
@@ -247,32 +279,30 @@ class CrudBindingTests(unittest.IsolatedAsyncioTestCase):
             ),
         )
 
-        routine_conn = FakeConnection()
-        await db_process.update_routine(
+        routine_conn = FakeConnection(
+            lastrowids={db_process.insert_routine_sql: [301, 302]},
+            rowcounts={db_process.delete_routine_group_sql: [2]},
+        )
+        routine_result = await db_process.update_routine(
             routine_conn,
             "user-1",
             {
-                "routine_id": 20,
+                "routine_group_id": "group-20",
                 "business": "수정 운동",
-                "day_of_week": 2,
+                "days_of_week": [2, 4],
                 "start_time": "22:00:00",
             },
         )
         self.assertEqual(
             routine_conn.calls[0][1],
-            (
-                "수정 운동",
-                2,
-                "22:00:00",
-                None,
-                None,
-                None,
-                None,
-                None,
-                20,
-                "user-1",
-            ),
+            ("group-20", "user-1"),
         )
+        self.assertEqual(routine_conn.calls[1][0], db_process.insert_routine_sql)
+        self.assertEqual(routine_conn.calls[1][1][0], "group-20")
+        self.assertEqual(routine_conn.calls[1][1][7], 2)
+        self.assertEqual(routine_conn.calls[2][1][7], 4)
+        self.assertEqual(routine_result["data"]["deleted_rows"], 2)
+        self.assertEqual(routine_result["data"]["routine_ids"], [301, 302])
 
         delete_schedule_conn = FakeConnection()
         await db_process.delete_schedule(
@@ -286,9 +316,12 @@ class CrudBindingTests(unittest.IsolatedAsyncioTestCase):
         await db_process.delete_routine(
             delete_routine_conn,
             "user-1",
-            {"routine_id": 20},
+            {"routine_group_id": "group-20"},
         )
-        self.assertEqual(delete_routine_conn.calls[0][1], (20, "user-1"))
+        self.assertEqual(
+            delete_routine_conn.calls[0][1],
+            ("group-20", "user-1"),
+        )
 
     async def test_process_db_query_routes_zero_through_seven(self):
         original_pool = db_process.connection.db_pool
@@ -310,9 +343,10 @@ class CrudBindingTests(unittest.IsolatedAsyncioTestCase):
                     }
                 elif query_type == 3:
                     args = {
+                        "routine_group_id": "group-3",
                         "start_time": "10:00:00",
                         "business": "루틴",
-                        "day_of_week": 2,
+                        "days_of_week": [2],
                     }
                 elif query_type in (4, 6):
                     args = {
@@ -322,16 +356,322 @@ class CrudBindingTests(unittest.IsolatedAsyncioTestCase):
                     }
                 else:
                     args = {
-                        "routine_id": 1,
+                        "routine_group_id": f"group-{query_type}",
                         "start_time": "10:00:00",
                         "business": "루틴",
-                        "day_of_week": 2,
+                        "days_of_week": [2],
                     }
 
                 result = await db_process.process_db_query("user-1", query_type, args)
                 self.assertEqual(result["status"], "success", query_type)
                 self.assertTrue(conn.committed, query_type)
                 self.assertFalse(conn.rolled_back, query_type)
+        finally:
+            db_process.connection.db_pool = original_pool
+
+    async def test_routine_replace_rolls_back_as_one_transaction(self):
+        original_pool = db_process.connection.db_pool
+        try:
+            conn = FakeConnection(
+                lastrowids={db_process.insert_routine_sql: [401]},
+                rowcounts={db_process.delete_routine_group_sql: [2]},
+                fail_on_call=3,
+            )
+            db_process.connection.db_pool = FakePool(conn)
+
+            result = await db_process.process_db_query(
+                "user-1",
+                5,
+                {
+                    "routine_group_id": "group-rollback",
+                    "days_of_week": [1, 3],
+                    "start_time": "10:00:00",
+                    "business": "원자적 교체",
+                },
+            )
+
+            self.assertEqual(result["status"], "error")
+            self.assertFalse(conn.committed)
+            self.assertTrue(conn.rolled_back)
+            self.assertEqual(conn.calls[0][0], db_process.delete_routine_group_sql)
+            self.assertEqual(conn.calls[1][0], db_process.insert_routine_sql)
+            self.assertEqual(conn.calls[2][0], db_process.insert_routine_sql)
+        finally:
+            db_process.connection.db_pool = original_pool
+
+    async def test_multi_day_routine_insert_rolls_back_as_one_transaction(self):
+        original_pool = db_process.connection.db_pool
+        try:
+            conn = FakeConnection(
+                lastrowids={db_process.insert_routine_sql: [501]},
+                fail_on_call=2,
+            )
+            db_process.connection.db_pool = FakePool(conn)
+
+            result = await db_process.process_db_query(
+                "user-1",
+                3,
+                {
+                    "routine_group_id": "group-insert-rollback",
+                    "days_of_week": [2, 4],
+                    "start_time": "10:00:00",
+                    "business": "다중 요일 삽입",
+                },
+            )
+
+            self.assertEqual(result["status"], "error")
+            self.assertFalse(conn.committed)
+            self.assertTrue(conn.rolled_back)
+            self.assertEqual(len(conn.calls), 2)
+            self.assertTrue(
+                all(call[0] == db_process.insert_routine_sql for call in conn.calls)
+            )
+        finally:
+            db_process.connection.db_pool = original_pool
+
+    async def test_routine_replace_rejects_missing_target_group(self):
+        conn = FakeConnection(
+            rowcounts={db_process.delete_routine_group_sql: [0]},
+        )
+
+        with self.assertRaises(LookupError):
+            await db_process.update_routine(
+                conn,
+                "user-1",
+                {
+                    "routine_group_id": "missing-group",
+                    "days_of_week": [1],
+                    "start_time": "10:00:00",
+                    "business": "없는 루틴",
+                },
+            )
+
+        self.assertEqual(len(conn.calls), 1)
+
+
+class TargetingAndConflictCandidateTests(unittest.IsolatedAsyncioTestCase):
+    async def test_future_schedule_dates_binding_and_normalization(self):
+        conn = FakeConnection(
+            results={
+                db_process.select_future_schedule_dates_sql: [[
+                    {"target_date": date(2026, 8, 5)},
+                    {"target_date": date(2026, 8, 6)},
+                ]]
+            }
+        )
+
+        result = await db_process.select_future_schedule_dates(
+            conn,
+            "user-1",
+            "2026-08-05 13:30:00",
+        )
+
+        self.assertEqual(result, ["2026-08-05", "2026-08-06"])
+        self.assertEqual(
+            conn.calls[0][1],
+            (datetime(2026, 8, 5, 13, 30), "user-1"),
+        )
+
+    async def test_active_weekdays_and_weekday_target_binding(self):
+        active_conn = FakeConnection(
+            results={
+                db_process.select_active_routine_weekdays_sql: [[
+                    {"target_day": 2},
+                    {"target_day": 4},
+                ]]
+            }
+        )
+        active_days = await db_process.select_active_routine_weekdays(
+            active_conn,
+            "user-1",
+            "2026-08-05 13:30:00",
+        )
+        self.assertEqual(active_days, [2, 4])
+        self.assertEqual(
+            active_conn.calls[0][1],
+            (datetime(2026, 8, 5, 13, 30), "user-1"),
+        )
+
+        routine_row = {
+            "Routine_ID": 10,
+            "Routine_Group_ID": "group-10",
+            "day_of_week": 2,
+            "start_time": time(10),
+            "end_time": time(12),
+            "business": "수업",
+            "location": None,
+            "who": '["동기"]',
+            "start_date": date(2026, 8, 1),
+            "end_date": None,
+        }
+        target_conn = FakeConnection(
+            results={db_process.select_routines_by_weekdays_sql: [[routine_row]]}
+        )
+        rows = await db_process.select_routines_by_weekdays(
+            target_conn,
+            "user-1",
+            [4, 2, 2],
+            "2026-08-05 13:30:00",
+        )
+        self.assertEqual(rows[0]["who"], ["동기"])
+        self.assertEqual(
+            target_conn.calls[0][1],
+            (
+                "[2, 4]",
+                datetime(2026, 8, 5, 13, 30),
+                "user-1",
+            ),
+        )
+
+    async def test_weekday_target_keeps_routine_with_future_start_date(self):
+        future_row = {
+            "Routine_ID": 99,
+            "Routine_Group_ID": "future-semester-group",
+            "day_of_week": 2,
+            "start_time": time(10),
+            "end_time": time(12),
+            "business": "다음 학기 수업",
+            "location": None,
+            "who": None,
+            "start_date": date(2026, 9, 1),
+            "end_date": date(2026, 12, 18),
+        }
+        conn = FakeConnection(
+            results={db_process.select_routines_by_weekdays_sql: [[future_row]]}
+        )
+
+        result = await db_process.select_routines_by_weekdays(
+            conn,
+            "user-1",
+            [2],
+            "2026-08-05 13:30:00",
+        )
+
+        self.assertEqual(result[0]["Routine_Group_ID"], "future-semester-group")
+        self.assertEqual(result[0]["start_date"], date(2026, 9, 1))
+
+    async def test_concrete_overlap_helpers_bind_excluded_targets(self):
+        schedule_conn = FakeConnection(
+            results={db_process.select_overlapping_schedules_sql: [[]]}
+        )
+        await db_process.select_overlapping_schedules(
+            schedule_conn,
+            "user-1",
+            "2026-08-05 10:00:00",
+            None,
+            excluded_schedule_id=50,
+        )
+        self.assertEqual(
+            schedule_conn.calls[0][1],
+            (
+                "user-1",
+                datetime(2026, 8, 5, 12, 0),
+                datetime(2026, 8, 5, 10, 0),
+                50,
+            ),
+        )
+
+        routine_conn = FakeConnection(
+            results={db_process.select_overlapping_routines_sql: [[]]}
+        )
+        await db_process.select_overlapping_routines(
+            routine_conn,
+            "user-1",
+            "2026-08-05",
+            "23:00:00",
+            "01:00:00",
+            excluded_group_id="group-50",
+        )
+        self.assertEqual(
+            routine_conn.calls[0][1],
+            (
+                date(2026, 8, 5),
+                time(23, 0),
+                time(1, 0),
+                "user-1",
+                "group-50",
+            ),
+        )
+
+    async def test_recurrence_conflict_candidate_bindings(self):
+        schedule_conn = FakeConnection(
+            results={db_process.select_schedules_for_routine_conflict_sql: [[]]}
+        )
+        await db_process.select_schedules_for_routine_conflict(
+            schedule_conn,
+            "user-1",
+            "2026-09-01",
+            "2026-12-18",
+        )
+        self.assertEqual(
+            schedule_conn.calls[0][1],
+            (date(2026, 9, 1), date(2026, 12, 18), "user-1"),
+        )
+
+        routine_conn = FakeConnection(
+            results={db_process.select_routines_for_recurrence_conflict_sql: [[]]}
+        )
+        await db_process.select_routines_for_recurrence_conflict(
+            routine_conn,
+            "user-1",
+            "2026-09-01",
+            None,
+            excluded_group_id="group-20",
+        )
+        self.assertEqual(
+            routine_conn.calls[0][1],
+            (date(2026, 9, 1), None, "user-1", "group-20"),
+        )
+
+    def test_sql_contracts_include_required_exclusions_and_validity(self):
+        self.assertIn("Schedule_ID <=> %s", db_process.select_overlapping_schedules_sql)
+        self.assertIn(
+            "Routine_Group_ID <=> %s",
+            db_process.select_routines_for_recurrence_conflict_sql,
+        )
+        self.assertIn(
+            "COALESCE(r.start_date, DATE(p.reference_time))",
+            db_process.select_routines_by_weekdays_sql,
+        )
+        self.assertIn(
+            "r.end_date >= r.candidate_date",
+            db_process.select_routines_by_weekdays_sql,
+        )
+        self.assertIn(
+            "COALESCE(r.start_date, DATE(p.reference_time))",
+            db_process.select_active_routine_weekdays_sql,
+        )
+        self.assertIn("TIMESTAMPADD", db_process.delete_expired_routine_sql)
+        self.assertNotIn("end_date < CURDATE()", db_process.delete_expired_routine_sql)
+        self.assertFalse(hasattr(db_process, "update_routine_sql"))
+        self.assertFalse(hasattr(db_process, "delete_routine_sql"))
+
+    def test_days_of_week_validation(self):
+        self.assertEqual(db_process.normalize_days_of_week([4, 2, 4]), [2, 4])
+        for invalid in ([], [7], [-1], [True], ["2"], 2, None):
+            with self.subTest(invalid=invalid):
+                with self.assertRaises(ValueError):
+                    db_process.normalize_days_of_week(invalid)
+
+    async def test_cleanup_uses_actual_routine_occurrence_end(self):
+        original_pool = db_process.connection.db_pool
+        try:
+            conn = FakeConnection(
+                rowcounts={
+                    db_process.delete_expired_schedule_sql: [3],
+                    db_process.delete_expired_routine_sql: [4],
+                }
+            )
+            db_process.connection.db_pool = FakePool(conn)
+
+            result = await db_process.cleanup_expired_data()
+
+            self.assertEqual(result["status"], "success")
+            self.assertEqual(result["deleted_schedules"], 3)
+            self.assertEqual(result["deleted_routines"], 4)
+            self.assertEqual(conn.calls[1][0], db_process.delete_expired_routine_sql)
+            self.assertTrue(conn.committed)
+            self.assertFalse(conn.rolled_back)
         finally:
             db_process.connection.db_pool = original_pool
 

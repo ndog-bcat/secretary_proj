@@ -54,6 +54,7 @@ select_routine_sql = """
           AND (r.end_date IS NULL OR r.end_date >= d.occurrence_date)
     )
     SELECT Routine_ID,
+           Routine_Group_ID,
            start_time,
            end_time,
            location,
@@ -85,8 +86,19 @@ insert_schedule_sql = """
 
 # [삽입] 루틴 --> QUERY 3
 insert_routine_sql = """
-    INSERT INTO Routine (User_ID, start_time, end_time, location, business, who, day_of_week, start_date, end_date)
-    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s);
+    INSERT INTO Routine (
+        Routine_Group_ID,
+        User_ID,
+        start_time,
+        end_time,
+        location,
+        business,
+        who,
+        day_of_week,
+        start_date,
+        end_date
+    )
+    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s);
 """
 
 # [수정] 단발성 일정 --> QUERY 4
@@ -100,30 +112,331 @@ update_schedule_sql = """
     WHERE Schedule_ID = %s AND User_ID = %s;
 """
 
-# [수정] 루틴 --> QUERY 5
-update_routine_sql = """
-    UPDATE Routine
-    SET business = %s,
-        day_of_week = %s,
-        start_time = %s,
-        end_time = %s,
-        start_date = %s,
-        end_date = %s,
-        location = %s,
-        who = %s
-    WHERE Routine_ID = %s AND User_ID = %s;
-"""
-
 # [삭제] 단발성 일정 --> QUERY 6
 delete_schedule_sql = """
     DELETE FROM Schedule
     WHERE Schedule_ID = %s AND User_ID = %s;
 """
 
-# [삭제] 루틴 --> QUERY 7
-delete_routine_sql = """
+# [삭제] 루틴 그룹 --> QUERY 7
+# 입력: (routine_group_id, user_id)
+delete_routine_group_sql = """
     DELETE FROM Routine
-    WHERE Routine_ID = %s AND User_ID = %s;
+    WHERE Routine_Group_ID = %s AND User_ID = %s;
+"""
+
+# [타겟팅] 지정한 요일에 걸치는 루틴 조회
+# 입력: (days_of_week_json, reference_time, user_id)
+# 요청 요일에 시작하는 루틴과 전날 시작해 요청 요일로 넘어오는 루틴을 모두 포함
+# reference_time 이후에 실제 진행 중이거나 시작 가능한 발생분이 있는 루틴만 반환
+select_routines_by_weekdays_sql = """
+    WITH requested_days AS (
+        SELECT DISTINCT requested_day
+        FROM JSON_TABLE(
+            %s,
+            '$[*]' COLUMNS (
+                requested_day TINYINT PATH '$'
+            )
+        ) AS requested
+        WHERE requested_day BETWEEN 0 AND 6
+    ),
+    params AS (
+        SELECT CAST(%s AS DATETIME) AS reference_time
+    ),
+    routine_bases AS (
+        SELECT r.*,
+               GREATEST(
+                   DATE(p.reference_time),
+                   COALESCE(r.start_date, DATE(p.reference_time))
+               ) AS base_date,
+               p.reference_time
+        FROM Routine AS r
+        CROSS JOIN params AS p
+        WHERE r.User_ID = %s
+    ),
+    first_candidates AS (
+        SELECT r.*,
+               DATE_ADD(
+                   r.base_date,
+                   INTERVAL MOD(
+                       r.day_of_week
+                       - (DAYOFWEEK(r.base_date) - 1)
+                       + 7,
+                       7
+                   ) DAY
+               ) AS first_candidate_date
+        FROM routine_bases AS r
+    ),
+    next_candidates AS (
+        SELECT r.*,
+               CASE
+                   WHEN TIMESTAMPADD(
+                            SECOND,
+                            COALESCE(
+                                CASE
+                                    WHEN r.end_time < r.start_time
+                                        THEN TIME_TO_SEC(r.end_time) + 86400
+                                    ELSE TIME_TO_SEC(r.end_time)
+                                END,
+                                TIME_TO_SEC(r.start_time) + 7200
+                            ),
+                            CAST(r.first_candidate_date AS DATETIME)
+                        ) <= r.reference_time
+                       THEN DATE_ADD(r.first_candidate_date, INTERVAL 7 DAY)
+                   ELSE r.first_candidate_date
+               END AS candidate_date
+        FROM first_candidates AS r
+    ),
+    future_occurrences AS (
+        SELECT r.Routine_ID
+        FROM next_candidates AS r
+        WHERE r.end_date IS NULL OR r.end_date >= r.candidate_date
+
+        UNION
+
+        SELECT r.Routine_ID
+        FROM routine_bases AS r
+        WHERE r.day_of_week = DAYOFWEEK(
+                  DATE_SUB(DATE(r.reference_time), INTERVAL 1 DAY)
+              ) - 1
+          AND (
+              r.start_date IS NULL
+              OR r.start_date <= DATE_SUB(
+                     DATE(r.reference_time),
+                     INTERVAL 1 DAY
+                 )
+          )
+          AND (
+              r.end_date IS NULL
+              OR r.end_date >= DATE_SUB(
+                     DATE(r.reference_time),
+                     INTERVAL 1 DAY
+                 )
+          )
+          AND TIMESTAMPADD(
+                  SECOND,
+                  COALESCE(
+                      CASE
+                          WHEN r.end_time < r.start_time
+                              THEN TIME_TO_SEC(r.end_time) + 86400
+                          ELSE TIME_TO_SEC(r.end_time)
+                      END,
+                      TIME_TO_SEC(r.start_time) + 7200
+                  ),
+                  CAST(
+                      DATE_SUB(
+                          DATE(r.reference_time),
+                          INTERVAL 1 DAY
+                      ) AS DATETIME
+                  )
+              ) > r.reference_time
+    )
+    SELECT r.Routine_ID,
+           r.Routine_Group_ID,
+           r.day_of_week,
+           r.start_time,
+           r.end_time,
+           r.location,
+           r.business,
+           r.who,
+           r.start_date,
+           r.end_date
+    FROM Routine AS r
+    JOIN future_occurrences AS f
+      ON f.Routine_ID = r.Routine_ID
+    WHERE 1 = 1
+      AND EXISTS (
+          SELECT 1
+          FROM requested_days AS d
+          WHERE r.day_of_week = d.requested_day
+             OR (
+                 r.day_of_week = MOD(d.requested_day + 6, 7)
+                 AND (
+                     (
+                         r.end_time IS NOT NULL
+                         AND r.end_time < r.start_time
+                         AND TIME_TO_SEC(r.end_time) > 0
+                     )
+                     OR (
+                         r.end_time IS NULL
+                         AND TIME_TO_SEC(r.start_time) + 7200 > 86400
+                     )
+                 )
+             )
+      )
+    ORDER BY r.day_of_week ASC, r.start_time ASC, r.Routine_ID ASC;
+"""
+
+# [타겟팅] 현재 시각 이후 일정이 존재하는 날짜 후보 조회
+# 입력: (reference_time, user_id)
+# 여러 날에 걸친 일정은 실제로 걸치는 모든 날짜를 반환
+select_future_schedule_dates_sql = """
+    WITH RECURSIVE params AS (
+        SELECT CAST(%s AS DATETIME) AS reference_time,
+               %s AS user_id
+    ),
+    future_schedules AS (
+        SELECT s.Schedule_ID,
+               GREATEST(DATE(s.start_time), DATE(p.reference_time)) AS target_date,
+               DATE(
+                   DATE_SUB(
+                       COALESCE(
+                           s.end_time,
+                           DATE_ADD(s.start_time, INTERVAL 2 HOUR)
+                       ),
+                       INTERVAL 1 MICROSECOND
+                   )
+               ) AS final_date
+        FROM Schedule AS s
+        CROSS JOIN params AS p
+        WHERE s.User_ID = p.user_id
+          AND COALESCE(
+                  s.end_time,
+                  DATE_ADD(s.start_time, INTERVAL 2 HOUR)
+              ) > p.reference_time
+    ),
+    schedule_days AS (
+        SELECT Schedule_ID, target_date, final_date
+        FROM future_schedules
+        WHERE target_date <= final_date
+
+        UNION ALL
+
+        SELECT Schedule_ID,
+               DATE_ADD(target_date, INTERVAL 1 DAY),
+               final_date
+        FROM schedule_days
+        WHERE target_date < final_date
+    )
+    SELECT DISTINCT target_date
+    FROM schedule_days
+    ORDER BY target_date ASC;
+"""
+
+# [타겟팅] 현재 또는 미래에 실제 발생 가능한 루틴이 걸치는 요일 후보 조회
+# 입력: (reference_time, user_id)
+# 자정을 넘는 루틴은 시작 요일과 다음 요일을 모두 반환
+select_active_routine_weekdays_sql = """
+    WITH params AS (
+        SELECT CAST(%s AS DATETIME) AS reference_time
+    ),
+    routine_bases AS (
+        SELECT r.*,
+               GREATEST(
+                   DATE(p.reference_time),
+                   COALESCE(r.start_date, DATE(p.reference_time))
+               ) AS base_date,
+               p.reference_time
+        FROM Routine AS r
+        CROSS JOIN params AS p
+        WHERE r.User_ID = %s
+    ),
+    first_candidates AS (
+        SELECT r.*,
+               DATE_ADD(
+                   r.base_date,
+                   INTERVAL MOD(
+                       r.day_of_week
+                       - (DAYOFWEEK(r.base_date) - 1)
+                       + 7,
+                       7
+                   ) DAY
+               ) AS first_candidate_date
+        FROM routine_bases AS r
+    ),
+    next_candidates AS (
+        SELECT r.*,
+               CASE
+                   WHEN TIMESTAMPADD(
+                            SECOND,
+                            COALESCE(
+                                CASE
+                                    WHEN r.end_time < r.start_time
+                                        THEN TIME_TO_SEC(r.end_time) + 86400
+                                    ELSE TIME_TO_SEC(r.end_time)
+                                END,
+                                TIME_TO_SEC(r.start_time) + 7200
+                            ),
+                            CAST(r.first_candidate_date AS DATETIME)
+                        ) <= r.reference_time
+                       THEN DATE_ADD(r.first_candidate_date, INTERVAL 7 DAY)
+                   ELSE r.first_candidate_date
+               END AS candidate_date
+        FROM first_candidates AS r
+    ),
+    eligible_routines AS (
+        SELECT r.Routine_ID
+        FROM next_candidates AS r
+        WHERE r.end_date IS NULL OR r.end_date >= r.candidate_date
+
+        UNION
+
+        SELECT r.Routine_ID
+        FROM routine_bases AS r
+        WHERE r.day_of_week = DAYOFWEEK(
+                  DATE_SUB(DATE(r.reference_time), INTERVAL 1 DAY)
+              ) - 1
+          AND (
+              r.start_date IS NULL
+              OR r.start_date <= DATE_SUB(
+                     DATE(r.reference_time),
+                     INTERVAL 1 DAY
+                 )
+          )
+          AND (
+              r.end_date IS NULL
+              OR r.end_date >= DATE_SUB(
+                     DATE(r.reference_time),
+                     INTERVAL 1 DAY
+                 )
+          )
+          AND TIMESTAMPADD(
+                  SECOND,
+                  COALESCE(
+                      CASE
+                          WHEN r.end_time < r.start_time
+                              THEN TIME_TO_SEC(r.end_time) + 86400
+                          ELSE TIME_TO_SEC(r.end_time)
+                      END,
+                      TIME_TO_SEC(r.start_time) + 7200
+                  ),
+                  CAST(
+                      DATE_SUB(
+                          DATE(r.reference_time),
+                          INTERVAL 1 DAY
+                      ) AS DATETIME
+                  )
+              ) > r.reference_time
+    ),
+    active_routines AS (
+        SELECT r.day_of_week,
+               r.start_time,
+               r.end_time
+        FROM Routine AS r
+        JOIN eligible_routines AS e
+          ON e.Routine_ID = r.Routine_ID
+    ),
+    target_days AS (
+        SELECT day_of_week AS target_day
+        FROM active_routines
+
+        UNION
+
+        SELECT MOD(day_of_week + 1, 7) AS target_day
+        FROM active_routines
+        WHERE (
+                  end_time IS NOT NULL
+                  AND end_time < start_time
+                  AND TIME_TO_SEC(end_time) > 0
+              )
+           OR (
+               end_time IS NULL
+               AND TIME_TO_SEC(start_time) + 7200 > 86400
+           )
+    )
+    SELECT target_day
+    FROM target_days
+    ORDER BY target_day ASC;
 """
 
 # [삽입] 유저
@@ -132,17 +445,88 @@ insert_user_info = """
     VALUES (%s, %s);
 """
 
-# [충돌 검사] 신규 일정(start, end)과 겹치는 기존 단발성 일정 조회
+# [충돌 검사] 신규/수정 일정(start, end)과 겹치는 기존 단발성 일정 조회
+# 입력: (user_id, new_end_time, new_start_time, excluded_schedule_id)
+# excluded_schedule_id가 None이면 모든 기존 일정을 검사
 select_overlapping_schedules_sql = """
     SELECT Schedule_ID, start_time, end_time, location, business, who
     FROM Schedule
     WHERE User_ID = %s
       AND start_time < %s
-      AND COALESCE(end_time, DATE_ADD(start_time, INTERVAL 2 HOUR)) > %s;
+      AND COALESCE(end_time, DATE_ADD(start_time, INTERVAL 2 HOUR)) > %s
+      AND NOT (Schedule_ID <=> %s);
+"""
+
+# [충돌 후보] 신규/수정 루틴의 유효 기간에 걸치는 기존 일정 조회
+# 입력: (new_start_date, new_end_date, user_id)
+# 실제 요일/시간 충돌은 서비스 계층에서 발생 구간으로 변환해 판정
+select_schedules_for_routine_conflict_sql = """
+    WITH params AS (
+        SELECT CAST(%s AS DATE) AS new_start_date,
+               CAST(%s AS DATE) AS new_end_date
+    )
+    SELECT s.Schedule_ID,
+           s.start_time,
+           s.end_time,
+           s.location,
+           s.business,
+           s.who
+    FROM Schedule AS s
+    CROSS JOIN params AS p
+    WHERE s.User_ID = %s
+      AND (
+          p.new_start_date IS NULL
+          OR COALESCE(
+                 s.end_time,
+                 DATE_ADD(s.start_time, INTERVAL 2 HOUR)
+             ) > CAST(p.new_start_date AS DATETIME)
+      )
+      AND (
+          p.new_end_date IS NULL
+          OR s.start_time < DATE_ADD(p.new_end_date, INTERVAL 2 DAY)
+      )
+    ORDER BY s.start_time ASC;
+"""
+
+# [충돌 후보] 신규/수정 루틴과 유효 기간이 겹칠 수 있는 기존 루틴 조회
+# 입력: (new_start_date, new_end_date, user_id, excluded_group_id)
+# 하루를 넘기는 발생분까지 고려해 유효 기간 경계를 하루 확장하며,
+# 실제 요일/시간 충돌은 서비스 계층에서 판정
+select_routines_for_recurrence_conflict_sql = """
+    WITH params AS (
+        SELECT CAST(%s AS DATE) AS new_start_date,
+               CAST(%s AS DATE) AS new_end_date
+    )
+    SELECT r.Routine_ID,
+           r.Routine_Group_ID,
+           r.start_time,
+           r.end_time,
+           r.location,
+           r.business,
+           r.who,
+           r.day_of_week,
+           r.start_date,
+           r.end_date
+    FROM Routine AS r
+    CROSS JOIN params AS p
+    WHERE r.User_ID = %s
+      AND NOT (r.Routine_Group_ID <=> %s)
+      AND (
+          p.new_start_date IS NULL
+          OR r.end_date IS NULL
+          OR r.end_date >= DATE_SUB(p.new_start_date, INTERVAL 1 DAY)
+      )
+      AND (
+          p.new_end_date IS NULL
+          OR r.start_date IS NULL
+          OR r.start_date <= DATE_ADD(p.new_end_date, INTERVAL 1 DAY)
+      )
+    ORDER BY r.day_of_week ASC, r.start_time ASC, r.Routine_ID ASC;
 """
 
 # [충돌 검사] 특정 날짜에 시작하는 신규 루틴과 겹치는 기존 루틴 조회
-# 입력: (occurrence_date, new_start_time, new_end_time, user_id)
+# 입력: (occurrence_date, new_start_time, new_end_time, user_id, excluded_group_id)
+# excluded_group_id가 None이면 모든 기존 루틴을 검사
 # 기존 루틴의 전날/당일/다음 날 발생분을 초 단위의 연속된 구간으로 변환해 비교
 select_overlapping_routines_sql = """
     WITH raw_params AS (
@@ -191,10 +575,12 @@ select_overlapping_routines_sql = """
         JOIN candidate_days AS d
           ON r.day_of_week = DAYOFWEEK(d.routine_date) - 1
         WHERE r.User_ID = %s
+          AND NOT (r.Routine_Group_ID <=> %s)
           AND (r.start_date IS NULL OR r.start_date <= d.routine_date)
           AND (r.end_date IS NULL OR r.end_date >= d.routine_date)
     )
     SELECT Routine_ID,
+           Routine_Group_ID,
            start_time,
            end_time,
            location,
@@ -213,10 +599,22 @@ delete_expired_schedule_sql = """
     WHERE COALESCE(end_time, DATE_ADD(start_time, INTERVAL 2 HOUR)) < NOW();
 """
 
-# [삭제] end_date 기간이 만료된 루틴 삭제
+# [삭제] 마지막 루틴 발생분의 실제 종료 시각이 지난 행 삭제
 delete_expired_routine_sql = """
-    DELETE FROM Routine 
-    WHERE end_date IS NOT NULL AND end_date < CURDATE();
+    DELETE FROM Routine
+    WHERE end_date IS NOT NULL
+      AND TIMESTAMPADD(
+              SECOND,
+              COALESCE(
+                  CASE
+                      WHEN end_time < start_time
+                          THEN TIME_TO_SEC(end_time) + 86400
+                      ELSE TIME_TO_SEC(end_time)
+                  END,
+                  TIME_TO_SEC(start_time) + 7200
+              ),
+              CAST(end_date AS DATETIME)
+          ) <= NOW();
 """
 
 # ==========================================
@@ -356,6 +754,7 @@ def routine_to_timeline_item(row: dict) -> tuple[datetime, datetime, dict]:
     item = {
         "type": "routine",
         "id": row["Routine_ID"],
+        "routine_group_id": row.get("Routine_Group_ID"),
         "business": row["business"],
         "start_time": format_datetime(occurrence_start),
         "end_time": format_datetime(occurrence_end),
@@ -372,6 +771,198 @@ def iter_dates(start_date: date, end_date: date):
     while current <= end_date:
         yield current
         current += timedelta(days=1)
+
+
+def normalize_days_of_week(value) -> list[int]:
+    """요일 목록을 중복 없는 0~6 정수 목록으로 검증·정규화합니다."""
+    if not isinstance(value, list):
+        raise ValueError("days_of_week은 0부터 6까지 정수로 이루어진 목록이어야 합니다.")
+
+    normalized = []
+    for item in value:
+        if isinstance(item, bool) or not isinstance(item, int):
+            raise ValueError("days_of_week의 각 값은 0부터 6까지의 정수여야 합니다.")
+        if item not in range(7):
+            raise ValueError("days_of_week의 각 값은 0부터 6 사이여야 합니다.")
+        if item not in normalized:
+            normalized.append(item)
+
+    if not normalized:
+        raise ValueError("하나 이상의 요일이 필요합니다.")
+    return sorted(normalized)
+
+
+def normalize_db_rows(rows) -> list[dict]:
+    """DictCursor 조회 행의 JSON 필드를 Python 값으로 복원합니다."""
+    normalized = []
+    for row in rows:
+        item = dict(row)
+        if "who" in item:
+            item["who"] = deserialize_json(item.get("who"))
+        normalized.append(item)
+    return normalized
+
+
+async def select_future_schedule_dates(
+    conn,
+    user_id: str,
+    reference_time,
+) -> list[str]:
+    """현재 시각 이후 일정이 실제로 걸치는 날짜 후보를 반환합니다."""
+    reference_dt = parse_to_datetime(reference_time)
+    async with conn.cursor(aiomysql.DictCursor) as cur:
+        await cur.execute(
+            select_future_schedule_dates_sql,
+            (reference_dt, user_id),
+        )
+        rows = await cur.fetchall()
+    return [parse_to_date(row["target_date"]).isoformat() for row in rows]
+
+
+async def select_active_routine_weekdays(
+    conn,
+    user_id: str,
+    reference_time,
+) -> list[int]:
+    """현재 또는 미래에 유효한 루틴이 걸치는 요일 후보를 반환합니다."""
+    reference_dt = parse_to_datetime(reference_time)
+    async with conn.cursor(aiomysql.DictCursor) as cur:
+        await cur.execute(
+            select_active_routine_weekdays_sql,
+            (reference_dt, user_id),
+        )
+        rows = await cur.fetchall()
+    return [int(row["target_day"]) for row in rows]
+
+
+async def select_routines_by_weekdays(
+    conn,
+    user_id: str,
+    days_of_week: list[int],
+    reference_time,
+) -> list[dict]:
+    """지정 요일에 시작하거나 전날부터 넘어오는 유효 루틴을 조회합니다."""
+    normalized_days = normalize_days_of_week(days_of_week)
+    reference_dt = parse_to_datetime(reference_time)
+    async with conn.cursor(aiomysql.DictCursor) as cur:
+        await cur.execute(
+            select_routines_by_weekdays_sql,
+            (json.dumps(normalized_days), reference_dt, user_id),
+        )
+        rows = await cur.fetchall()
+    return normalize_db_rows(rows)
+
+
+async def select_overlapping_schedules(
+    conn,
+    user_id: str,
+    start_time,
+    end_time=None,
+    excluded_schedule_id=None,
+) -> list[dict]:
+    """일정 구간과 겹치는 기존 일정을 조회하며 수정 대상은 선택적으로 제외합니다."""
+    start_dt = parse_to_datetime(start_time)
+    end_dt = (
+        start_dt + DEFAULT_DURATION
+        if end_time is None
+        else parse_to_datetime(end_time)
+    )
+    if start_dt >= end_dt:
+        raise ValueError("일정 종료 시각은 시작 시각보다 뒤여야 합니다.")
+
+    async with conn.cursor(aiomysql.DictCursor) as cur:
+        await cur.execute(
+            select_overlapping_schedules_sql,
+            (user_id, end_dt, start_dt, excluded_schedule_id),
+        )
+        rows = await cur.fetchall()
+    return normalize_db_rows(rows)
+
+
+async def select_overlapping_routines(
+    conn,
+    user_id: str,
+    occurrence_date,
+    start_time,
+    end_time=None,
+    excluded_group_id=None,
+) -> list[dict]:
+    """특정 날짜의 새 루틴 발생분과 겹치는 기존 루틴을 조회합니다."""
+    target_date = parse_to_date(occurrence_date)
+    start_value = parse_to_time(start_time)
+    end_value = None if end_time is None else parse_to_time(end_time)
+    if end_value is not None and end_value == start_value:
+        raise ValueError("루틴 종료 시각은 시작 시각과 같을 수 없습니다.")
+
+    async with conn.cursor(aiomysql.DictCursor) as cur:
+        await cur.execute(
+            select_overlapping_routines_sql,
+            (
+                target_date,
+                start_value,
+                end_value,
+                user_id,
+                excluded_group_id,
+            ),
+        )
+        rows = await cur.fetchall()
+    return normalize_db_rows(rows)
+
+
+async def select_schedules_for_routine_conflict(
+    conn,
+    user_id: str,
+    start_date,
+    end_date=None,
+) -> list[dict]:
+    """새 루틴 유효 기간에 충돌할 가능성이 있는 기존 일정 후보를 조회합니다."""
+    normalized_start = None if start_date is None else parse_to_date(start_date)
+    normalized_end = None if end_date is None else parse_to_date(end_date)
+    if (
+        normalized_start is not None
+        and normalized_end is not None
+        and normalized_start > normalized_end
+    ):
+        raise ValueError("루틴 종료 날짜는 시작 날짜보다 빠를 수 없습니다.")
+
+    async with conn.cursor(aiomysql.DictCursor) as cur:
+        await cur.execute(
+            select_schedules_for_routine_conflict_sql,
+            (normalized_start, normalized_end, user_id),
+        )
+        rows = await cur.fetchall()
+    return normalize_db_rows(rows)
+
+
+async def select_routines_for_recurrence_conflict(
+    conn,
+    user_id: str,
+    start_date,
+    end_date=None,
+    excluded_group_id=None,
+) -> list[dict]:
+    """새 루틴과 충돌할 가능성이 있는 기존 반복 규칙 후보를 조회합니다."""
+    normalized_start = None if start_date is None else parse_to_date(start_date)
+    normalized_end = None if end_date is None else parse_to_date(end_date)
+    if (
+        normalized_start is not None
+        and normalized_end is not None
+        and normalized_start > normalized_end
+    ):
+        raise ValueError("루틴 종료 날짜는 시작 날짜보다 빠를 수 없습니다.")
+
+    async with conn.cursor(aiomysql.DictCursor) as cur:
+        await cur.execute(
+            select_routines_for_recurrence_conflict_sql,
+            (
+                normalized_start,
+                normalized_end,
+                user_id,
+                excluded_group_id,
+            ),
+        )
+        rows = await cur.fetchall()
+    return normalize_db_rows(rows)
 
 
 async def select_timeline(
@@ -482,26 +1073,43 @@ async def insert_schedule(conn, user_id: str, args: dict) -> dict:
     }
 
 
-async def insert_routine(conn, user_id: str, args: dict) -> dict:
-    """3: 충돌 검사가 끝난 루틴을 삽입합니다."""
-    values = (
-        user_id,
-        args.get("start_time"),
-        args.get("end_time"),
-        args.get("location"),
-        args.get("business"),
-        serialize_json(args.get("who")),
-        args.get("day_of_week"),
-        args.get("start_date"),
-        args.get("end_date"),
-    )
-    async with conn.cursor() as cur:
+async def _insert_routine_rows(cur, user_id: str, args: dict) -> list[int]:
+    """같은 그룹 ID로 요일별 루틴 행을 삽입하고 생성 ID 목록을 반환합니다."""
+    routine_group_id = args.get("routine_group_id")
+    if not isinstance(routine_group_id, str) or not routine_group_id.strip():
+        raise ValueError("routine_group_id가 필요합니다.")
+
+    days_of_week = normalize_days_of_week(args.get("days_of_week"))
+    routine_ids = []
+    for day_of_week in days_of_week:
+        values = (
+            routine_group_id,
+            user_id,
+            args.get("start_time"),
+            args.get("end_time"),
+            args.get("location"),
+            args.get("business"),
+            serialize_json(args.get("who")),
+            day_of_week,
+            args.get("start_date"),
+            args.get("end_date"),
+        )
         await cur.execute(insert_routine_sql, values)
-        routine_id = cur.lastrowid
+        routine_ids.append(cur.lastrowid)
+    return routine_ids
+
+
+async def insert_routine(conn, user_id: str, args: dict) -> dict:
+    """3: 충돌 검사가 끝난 다중 요일 루틴을 같은 그룹으로 삽입합니다."""
+    async with conn.cursor() as cur:
+        routine_ids = await _insert_routine_rows(cur, user_id, args)
     return {
         "status": "success",
         "query_type": 3,
-        "data": {"routine_id": routine_id},
+        "data": {
+            "routine_group_id": args["routine_group_id"],
+            "routine_ids": routine_ids,
+        },
     }
 
 
@@ -531,29 +1139,27 @@ async def update_schedule(conn, user_id: str, args: dict) -> dict:
 
 
 async def update_routine(conn, user_id: str, args: dict) -> dict:
-    """5: 타겟팅과 충돌 검사가 끝난 루틴을 전체 교체합니다."""
-    routine_id = args.get("routine_id")
-    values = (
-        args.get("business"),
-        args.get("day_of_week"),
-        args.get("start_time"),
-        args.get("end_time"),
-        args.get("start_date"),
-        args.get("end_date"),
-        args.get("location"),
-        serialize_json(args.get("who")),
-        routine_id,
-        user_id,
-    )
+    """5: 기존 루틴 그룹을 삭제하고 새 요일별 행으로 전체 교체합니다."""
+    routine_group_id = args.get("routine_group_id")
+    if not isinstance(routine_group_id, str) or not routine_group_id.strip():
+        raise ValueError("routine_group_id가 필요합니다.")
+
     async with conn.cursor() as cur:
-        await cur.execute(update_routine_sql, values)
-        affected_rows = cur.rowcount
+        await cur.execute(
+            delete_routine_group_sql,
+            (routine_group_id, user_id),
+        )
+        deleted_rows = cur.rowcount
+        if deleted_rows == 0:
+            raise LookupError("수정할 루틴 그룹을 찾을 수 없습니다.")
+        routine_ids = await _insert_routine_rows(cur, user_id, args)
     return {
         "status": "success",
         "query_type": 5,
         "data": {
-            "routine_id": routine_id,
-            "affected_rows": affected_rows,
+            "routine_group_id": routine_group_id,
+            "deleted_rows": deleted_rows,
+            "routine_ids": routine_ids,
         },
     }
 
@@ -575,16 +1181,19 @@ async def delete_schedule(conn, user_id: str, args: dict) -> dict:
 
 
 async def delete_routine(conn, user_id: str, args: dict) -> dict:
-    """7: 타겟팅이 끝난 루틴을 삭제합니다."""
-    routine_id = args.get("routine_id")
+    """7: 타겟팅이 끝난 루틴 그룹 전체를 삭제합니다."""
+    routine_group_id = args.get("routine_group_id")
     async with conn.cursor() as cur:
-        await cur.execute(delete_routine_sql, (routine_id, user_id))
+        await cur.execute(
+            delete_routine_group_sql,
+            (routine_group_id, user_id),
+        )
         affected_rows = cur.rowcount
     return {
         "status": "success",
         "query_type": 7,
         "data": {
-            "routine_id": routine_id,
+            "routine_group_id": routine_group_id,
             "affected_rows": affected_rows,
         },
     }
@@ -625,7 +1234,6 @@ async def process_db_query(user_id: str, query_type: int, query_args: dict) -> d
                 "query_type": query_type,
                 "message": f"DB 처리 중 에러 발생: {exc}",
             }
-
 
 async def cleanup_expired_data() -> dict:
     """백그라운드에서 정기적으로 실행되어 만료된 일정 및 루틴을 청소합니다."""

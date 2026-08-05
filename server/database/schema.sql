@@ -30,8 +30,13 @@ CREATE TABLE Schedule (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 -- 5. Routine (반복 일정) 테이블
+-- 하나의 논리적 루틴은 Routine_Group_ID를 공유하며, 시작 요일마다 한 행으로 저장
 CREATE TABLE Routine (
     Routine_ID INT NOT NULL AUTO_INCREMENT,
+    Routine_Group_ID CHAR(36)
+        CHARACTER SET ascii
+        COLLATE ascii_bin
+        NOT NULL,
     User_ID VARCHAR(50) NOT NULL,
     start_time TIME NOT NULL,
     end_time TIME DEFAULT NULL,
@@ -41,23 +46,48 @@ CREATE TABLE Routine (
     day_of_week TINYINT NOT NULL,
     start_date DATE DEFAULT NULL,
     end_date DATE DEFAULT NULL,
+
     PRIMARY KEY (Routine_ID),
-    FOREIGN KEY (User_ID) REFERENCES User(ID) ON DELETE CASCADE,
+
+    FOREIGN KEY (User_ID)
+        REFERENCES User(ID)
+        ON DELETE CASCADE,
+
+    CONSTRAINT uq_routine_group_day
+        UNIQUE (
+            User_ID,
+            Routine_Group_ID,
+            day_of_week
+        ),
+
     CONSTRAINT chk_routine_day_of_week
         CHECK (day_of_week BETWEEN 0 AND 6),
+
     CONSTRAINT chk_routine_clock_range
         CHECK (
             start_time >= '00:00:00'
             AND start_time < '24:00:00'
             AND (
                 end_time IS NULL
-                OR (end_time >= '00:00:00' AND end_time < '24:00:00')
+                OR (
+                    end_time >= '00:00:00'
+                    AND end_time < '24:00:00'
+                )
             )
         ),
+
     CONSTRAINT chk_routine_time_range
-        CHECK (end_time IS NULL OR end_time <> start_time),
+        CHECK (
+            end_time IS NULL
+            OR end_time <> start_time
+        ),
+
     CONSTRAINT chk_routine_date_range
-        CHECK (start_date IS NULL OR end_date IS NULL OR start_date <= end_date)
+        CHECK (
+            start_date IS NULL
+            OR end_date IS NULL
+            OR start_date <= end_date
+        )
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 -- Performance를 위한 인덱스 설정

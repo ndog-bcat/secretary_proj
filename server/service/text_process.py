@@ -5,41 +5,21 @@ import httpx
 import json
 from datetime import datetime
 from service import db_process, query_context
+from service.query_context import next_step_mapping, parameter_templates, mandatory_parameters, optional_parameters, QUERY_PARAMETER_SPECS
 from copy import deepcopy
 
 OLLAMA_URL = "http://localhost:11434/api/generate"
 
-next_step_mapping = {
-    0: "waiting_parameters", 
-    1: "waiting_parameters",
-    2: "waiting_parameters",
-    3: "waiting_parameters",
-    4: "waiting_to_pick_day",
-    5: "waiting_to_pick_weekday",
-    6: "waiting_to_pick_day",
-    7: "waiting_to_pick_weekday"
-}
-parameter_templates = {
-    0: {},
-    1: {},
-    2: {},
-    3: {},
-    4: {},
-    5: {},
-    6: {},
-    7: {}
-}
-
 async def process_text_query(query_context: query_context.ScheduleQueryContext) -> query_context.ScheduleQueryContext:
     if (query_context.pending_step == "classification"):
         query_type = await identify_query_type(query_context.request_time, query_context.user_text)
+        if query_type not in range(8):
+            query_context.pending_step = "failed"
+            query_context.response_message = "❌ 쿼리 유형을 파악할 수 없습니다. 다시 시도해주세요."
+            return query_context
         query_context.query_type = query_type # query_context에 query_type 저장
         query_context.current_parameters = deepcopy(parameter_templates.get(query_type)) # query_context에 current_parameters 초기화
         query_context.pending_step = deepcopy(next_step_mapping.get(query_type)) # query_context에 pending_step 초기화
-    if query_type not in range(8):
-        query_context.pending_step = "failed"
-        query_context.response_message = "❌ 쿼리 유형을 파악할 수 없습니다. 다시 시도해주세요."
-        return query_context
     return await core_processing(query_context)
 
 async def identify_query_type(request_time: str, user_text: str) -> int:
@@ -114,27 +94,88 @@ async def core_processing(query_context: query_context.ScheduleQueryContext):
             # 오류
             pass
 
-async def create_final_response(db_result: dict, is_success: bool, query_type: int) -> str:
-    if (is_success):
-        pass
-    else:
-        pass
+# 그냥 누락된 인자 체크(인자 추출용)
+def list_to_extract(query_type: int, curr_arg: dict) -> list[str]:
+    missing_args = []
+    for i in mandatory_parameters.get(query_type):
+        if (curr_arg.get(i) is None):
+            missing_args.append(i)
+    for i in optional_parameters.get(query_type):
+        if (curr_arg.get(i) is None):
+            missing_args.append(i)
+    return missing_args
+
+# 필수 인자 없을시 누락된 인자 반환(재질문용)
+def check_arg(query_type: int, curr_arg: dict) -> list[str]:
+    missing_args = []
+    for i in mandatory_parameters.get(query_type):
+        if (curr_arg.get(i) is None):
+            missing_args.append(i)
+    if (len(missing_args) > 0):
+        for i in optional_parameters.get(query_type):
+                if (curr_arg.get(i) is None):
+                    missing_args.append(i)
+    return missing_args
+
+async def make_response_message(query_type: int, required_args: list[str]) -> str:
+    if (query_type == 0):
+        return f"{', '.join(required_args)}이(가) 누락되었습니다. 특정 날짜를 알려주세요."
+    elif (query_type == 1):
+        return f"{', '.join(required_args)}이(가) 누락되었습니다. 시작 날짜와 종료 날짜를 알려주세요."
+    elif (query_type == 2):
+        return f"{', '.join(required_args)}이(가) 누락되었습니다. 일정 삽입에 필요한 정보를 알려주세요."
+    elif (query_type == 3):
+        return f"{', '.join(required_args)}이(가) 누락되었습니다. 루틴 삽입에 필요한 정보를 알려주세요."
+    elif (query_type == 4):
+        return f"{', '.join(required_args)}이(가) 누락되었습니다. 일정 수정에 필요한 정보를 알려주세요."    
+    elif (query_type == 5):
+        return f"{', '.join(required_args)}이(가) 누락되었습니다. 루틴 수정에 필요한 정보를 알려주세요."
+
+async def extract_parameters_from_text(query_type: int, user_text: str, required_args: list[str], request_time: str, current_parameters: dict):
+    # 1. 필요 인자 추출
+    # 2. 현재 있는 인자 중 없는 필요 인자들을 current_parameters에 추가
     return
 
+async def create_final_response(db_result: dict, query_type: int) -> str:
+    if db_result.get("status") != "success":
+        return db_result.get(
+            "message",
+            "일정을 조회하는 중 오류가 발생했습니다.",
+        )
+
+    timeline = db_result.get("timeline", [])
+    target_date = db_result.get("target_date")
+
+    if not timeline:
+        return f"{target_date}에는 등록된 일정이나 루틴이 없습니다."
+
+    # timeline 포맷팅
+
 async def handle_day_query(query_context: query_context.ScheduleQueryContext):
+    user_id = query_context.user_id
+    query_type = query_context.query_type
+    user_text = query_context.user_text
+    request_time = query_context.request_time
+    # 종료상태에서 재진입 시 바로 반환
+    if query_context.pending_step == "done":
+        return query_context
     # 1. 필수 인자(재질문)
     if (query_context.pending_step == "waiting_parameters"):
         # 첫번째로 필수 인자 및 필요인자 체크
+        fields_to_extract = list_to_extract(query_type, query_context.current_parameters)
         # 2차 분석 단계에서 필요한 인자 추출
-        # 예: 날짜, 시간, 일정 종류 등
-        pass
-    # 2. DB 조회
+        await extract_parameters_from_text(query_type, user_text, fields_to_extract, request_time, query_context.current_parameters)
+        missing_args = check_arg(query_type, query_context.current_parameters)
+        if (len(missing_args) > 0):
+            query_context.response_message = await make_response_message(query_context.query_type, missing_args)
+            return query_context
+        # 2. DB 조회
+        else:
+            db_result = await db_process.process_db_query(user_id, query_type, query_context.current_parameters)
     # 3. 조회 성공 or 실패 답변 반환
-    if (query_context.pending_step == "completed"):
-        pass
-    if (query_context.pending_step == "failed"):
-        pass
-    return
+    query_context.response_message = await create_final_response(db_result, query_context.query_type)
+    query_context.pending_step = "done"
+    return query_context
 
 async def handle_range_query(query_context: query_context.ScheduleQueryContext):
     # 1. 필수 인자(재질문)
@@ -257,7 +298,4 @@ async def handle_routine_delete(query_context: query_context.ScheduleQueryContex
         pass
     if (query_context.pending_step == "failed"):
         pass
-    return
-
-def check_arg(query_type: int, curr_arg: dict, required_arg: dict) -> dict:
     return

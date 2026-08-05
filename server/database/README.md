@@ -32,7 +32,8 @@
 - nullable 인자: end_time, location, who
 
 ### Routine: 요일 기반 반복 일정을 저장합니다.
-- Routine_ID: 루틴 ID. 자동 생성
+- Routine_ID: 요일별 루틴 행 ID. DB에서 자동 생성
+- Routine_Group_ID: 같은 논리적 루틴의 요일별 행이 공유하는 그룹 ID. 서비스가 UUID 문자열을 한 번 생성해 전달
 - User_ID: 사용자 ID
 - start_time: 시작 시간. (ex. 00:00:01)
 - end_time: 종료 시간. (ex. 00:00:01). NULL이면 시작 후 2시간을 종료 시각으로 간주
@@ -43,8 +44,28 @@
 - start_date: 루틴 시작일의 유효 범위 하한. NULL이면 하한 없음
 - end_date: 루틴 시작일의 유효 범위 상한. NULL이면 무기한
 - 자동 생성 인자: Routine_ID
-- 필수 입력 인자: User_ID, start_time, business, day_of_week
+- 프로그램 생성 인자: Routine_Group_ID
+- DB 삽입 필수 인자: Routine_Group_ID, User_ID, start_time, business, day_of_week
 - nullable 인자: end_time, location, who, start_date, end_date
+
+#### 여러 요일 루틴
+- Routine의 한 행은 시작 요일 하나만 저장하며, `day_of_week`은 정수 하나입니다.
+- 자연어에서 추출한 여러 요일은 서비스에서 요일별 행으로 확장합니다.
+- 같은 요청에서 생성된 모든 요일별 행에는 같은 `Routine_Group_ID`를 사용합니다.
+- `(User_ID, Routine_Group_ID, day_of_week)` UNIQUE 제약으로 같은 그룹의 동일 요일이 중복 저장되는 것을 방지합니다.
+- 요일 기반 타겟팅은 요청 요일에 시작하는 루틴뿐 아니라 전날 시작해 자정을 넘어 요청 요일에 걸치는 루틴도 포함합니다.
+- 예를 들어 화요일과 목요일에 반복되는 시스템프로그래밍 수업은 아래 두 행으로 저장합니다.
+
+|Routine_ID|Routine_Group_ID|business|day_of_week|
+|:---:|:---:|:---|:---:|
+|10|동일한 UUID|시스템프로그래밍 수업|2|
+|11|동일한 UUID|시스템프로그래밍 수업|4|
+
+#### 루틴 식별 범위
+- `Routine_ID`는 특정 요일의 물리적인 루틴 행 하나를 식별하는 내부 ID입니다.
+- `Routine_Group_ID`는 같은 논리적 루틴에 속한 모든 요일별 행을 대상으로 사용합니다.
+- 그룹 전체 수정은 기존 그룹을 제외하고 새 루틴 집합의 충돌을 검사한 뒤, 같은 트랜잭션에서 기존 그룹을 삭제하고 새 행들을 삽입하는 전체 교체 방식으로 처리합니다.
+- 서비스의 루틴 삭제는 `Routine_Group_ID`로 논리적 루틴 전체를 삭제합니다.
 
 #### 자정을 넘는 루틴
 - `end_time > start_time`: 시작한 당일에 종료
@@ -55,7 +76,7 @@
 - 예를 들어 `day_of_week=1`, `start_time=23:00:00`, `end_time=01:00:00`은 월요일 23시에 시작해 화요일 1시에 종료되는 루틴
 
 ### end_time NULLABLE
-- end_time이 NULL이라면 해당 일정은 2시간 동안 유지된다고 가정함
+- Schedule 또는 Routine의 end_time이 NULL이라면 시작 후 2시간을 종료 시각으로 간주합니다.
 
 ## 초기화 방법
 MySQL 8.0.16 이상 서버가 실행 중이라면 아래처럼 스키마를 적용할 수 있습니다.
