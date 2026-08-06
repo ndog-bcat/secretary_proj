@@ -136,6 +136,16 @@ async def extract_parameters_from_text(query_type: int, user_text: str, required
     # 2. 현재 있는 인자 중 없는 필요 인자들을 current_parameters에 추가
     return
 
+async def request_date_info() -> str:
+    return
+
+async def request_weekday_info() -> str:
+    return
+
+async def targeting() -> str:
+    target_id = None
+    return
+
 async def create_final_response(db_result: dict, query_type: int) -> str:
     if db_result.get("status") != "success":
         return db_result.get(
