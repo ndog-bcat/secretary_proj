@@ -117,7 +117,7 @@ def check_arg(query_type: int, curr_arg: dict) -> list[str]:
                     missing_args.append(i)
     return missing_args
 
-async def make_response_message(query_type: int, required_args: list[str]) -> str:
+async def parameter_request_message(query_type: int, required_args: list[str]) -> str:
     if (query_type == 0):
         return f"{', '.join(required_args)}이(가) 누락되었습니다. 특정 날짜를 알려주세요."
     elif (query_type == 1):
@@ -132,9 +132,39 @@ async def make_response_message(query_type: int, required_args: list[str]) -> st
         return f"{', '.join(required_args)}이(가) 누락되었습니다. 루틴 수정에 필요한 정보를 알려주세요."
 
 async def extract_parameters_from_text(query_type: int, user_text: str, required_args: list[str], request_time: str, current_parameters: dict):
-    # 1. 필요 인자 추출
-    # 2. 현재 있는 인자 중 없는 필요 인자들을 current_parameters에 추가
-    return
+    prompt = (f"""
+        당신은 다.
+        기준 시각:
+        {request_time}
+        필요 인자:
+        {required_args}
+        사용자 자연어 쿼리:
+        {user_text}
+    
+        하라.
+    
+        반드시 JSON만 반환하라.
+    
+        출력 예시:
+        """
+        )
+    
+    payload = {
+        "model": "qwen2.5-coder:7b",
+        "prompt": prompt,
+        "stream": False,
+        "format": "json"
+    }
+
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.post(OLLAMA_URL, json=payload, timeout=30.0)
+            if response.status_code == 200:
+                result_str = response.json().get("response", "{}")
+                query_type = int(json.loads(result_str).get("query_type", -1))
+            print(f"Ollama 에러: {response.status_code}")
+    except Exception as e:
+        print(f"AI 라우팅 실패: {str(e)}")
 
 async def request_date_info() -> str:
     return
@@ -145,6 +175,10 @@ async def request_weekday_info() -> str:
 async def targeting() -> str:
     target_id = None
     return
+
+async def collission_check() -> dict:
+    collision_schedule = {}
+    return collision_schedule
 
 async def create_final_response(db_result: dict, query_type: int) -> str:
     if db_result.get("status") != "success":
@@ -177,7 +211,7 @@ async def handle_day_query(query_context: query_context.ScheduleQueryContext):
         await extract_parameters_from_text(query_type, user_text, fields_to_extract, request_time, query_context.current_parameters)
         missing_args = check_arg(query_type, query_context.current_parameters)
         if (len(missing_args) > 0):
-            query_context.response_message = await make_response_message(query_context.query_type, missing_args)
+            query_context.response_message = await parameter_request_message(query_context.query_type, missing_args)
             return query_context
         # 2. DB 조회
         else:
@@ -188,19 +222,30 @@ async def handle_day_query(query_context: query_context.ScheduleQueryContext):
     return query_context
 
 async def handle_range_query(query_context: query_context.ScheduleQueryContext):
+    user_id = query_context.user_id
+    query_type = query_context.query_type
+    user_text = query_context.user_text
+    request_time = query_context.request_time
+    # 종료상태에서 재진입 시 바로 반환
+    if query_context.pending_step == "done":
+        return query_context
     # 1. 필수 인자(재질문)
     if (query_context.pending_step == "waiting_parameters"):
         # 첫번째로 필수 인자 및 필요인자 체크
+        fields_to_extract = list_to_extract(query_type, query_context.current_parameters)
         # 2차 분석 단계에서 필요한 인자 추출
-        # 예: 시작 날짜, 종료 날짜, 일정 종류 등
-        pass
+        await extract_parameters_from_text(query_type, user_text, fields_to_extract, request_time, query_context.current_parameters)
+        # 인자 부재시 디폴트값 삽입
+        if (query_context.current_parameters["start_time"] == None):
+            query_context.current_parameters["start_time"] = request_time
+        if (query_context.current_parameters["end_time"] == None):
+            query_context.current_parameters["end_time"] = datetime.strftime(datetime.strptime(request_time, "%Y-%m-%d 00:00:00") + datetime.timedelta(days=1))
     # 2. DB 조회
+    db_result = await db_process.process_db_query(user_id, query_type, query_context.current_parameters)
     # 3. 조회 성공 or 실패 답변 반환
-    if (query_context.pending_step == "completed"):
-        pass
-    if (query_context.pending_step == "failed"):
-        pass
-    return
+    query_context.response_message = await create_final_response(db_result, query_context.query_type)
+    query_context.pending_step = "done"
+    return query_context
 
 async def handle_schedule_insert(query_context: query_context.ScheduleQueryContext):
     # 1. 필수 인자(재질문)
