@@ -12,7 +12,7 @@ OLLAMA_URL = "http://localhost:11434/api/generate"
 
 async def process_text_query(query_context: query_context.ScheduleQueryContext) -> query_context.ScheduleQueryContext:
     if (query_context.pending_step == "classification"):
-        query_type = await identify_query_type(query_context.request_time, query_context.user_text)
+        query_type = await identify_query_type(query_context.user_text)
         if query_type not in range(8):
             query_context.pending_step = "failed"
             query_context.response_message = "❌ 쿼리 유형을 파악할 수 없습니다. 다시 시도해주세요."
@@ -22,11 +22,10 @@ async def process_text_query(query_context: query_context.ScheduleQueryContext) 
         query_context.pending_step = deepcopy(next_step_mapping.get(query_type)) # query_context에 pending_step 초기화
     return await core_processing(query_context)
 
-async def identify_query_type(request_time: str, user_text: str) -> int:
+async def identify_query_type(user_text: str) -> int:
     prompt = (f"""
-    당신은 일정 관리 요청 분류기다.
+    당신은 일정 관리 요청 쿼리 유형 분류기다.
     기준 시각:
-    {request_time}
 
     아래 자연어 요청을 0~7 중 하나로 분류하라.
 
@@ -131,8 +130,27 @@ async def parameter_request_message(query_type: int, required_args: list[str]) -
     elif (query_type == 5):
         return f"{', '.join(required_args)}이(가) 누락되었습니다. 루틴 수정에 필요한 정보를 알려주세요."
 
-async def extract_parameters_from_text(query_type: int, user_text: str, required_args: list[str], request_time: str, current_parameters: dict):
-    prompt = (f"""
+async def extract_parameters_from_text(query_type: int, user_text: str, required_args: list[str], request_time: str, current_parameters: dict) -> dict:
+    non_targeting_prompt = (f"""
+        당신은 다.
+        기준 시각:
+        {request_time}
+        필요 인자:
+        {required_args}
+        인자별 명세:
+        {QUERY_PARAMETER_SPECS[query_type]}
+        사용자 자연어 쿼리:
+        {user_text}
+    
+        하라.
+    
+        반드시 JSON만 반환하라.
+    
+        출력 예시:
+        """
+        )
+
+    targeting_prompt = (f"""
         당신은 다.
         기준 시각:
         {request_time}
@@ -148,6 +166,8 @@ async def extract_parameters_from_text(query_type: int, user_text: str, required
         출력 예시:
         """
         )
+
+    prompt = non_targeting_prompt if query_type < 4 else targeting_prompt
     
     payload = {
         "model": "qwen2.5-coder:7b",
@@ -161,10 +181,25 @@ async def extract_parameters_from_text(query_type: int, user_text: str, required
             response = await client.post(OLLAMA_URL, json=payload, timeout=30.0)
             if response.status_code == 200:
                 result_str = response.json().get("response", "{}")
-                query_type = int(json.loads(result_str).get("query_type", -1))
+                extract_result = dict(json.loads(result_str).get("extract_result"))
+                return extract_result
             print(f"Ollama 에러: {response.status_code}")
+            return {"result": "extract fail"}
     except Exception as e:
         print(f"AI 라우팅 실패: {str(e)}")
+        return {"result": "extract fail"}
+
+async def update_current_parameters(query_type: int, user_text: str, required_args: list[str], request_time: str, current_parameters: dict) -> int:
+    extracted_parameters = extract_parameters_from_text(query_type, user_text, required_args, request_time, current_parameters)
+    is_success = False if (extracted_parameters.get("result") == "extract fail") else True
+    if (is_success == False):
+        print("인자 추출 중 오류가 발생했습니다.")
+        return -1
+    else:
+        for key in extracted_parameters.keys():
+            if (current_parameters[key] == None and extracted_parameters[key] != None):
+                current_parameters[key] = extracted_parameters[key]
+        return 1
 
 async def request_date_info() -> str:
     return
@@ -208,7 +243,10 @@ async def handle_day_query(query_context: query_context.ScheduleQueryContext):
         # 첫번째로 필수 인자 및 필요인자 체크
         fields_to_extract = list_to_extract(query_type, query_context.current_parameters)
         # 2차 분석 단계에서 필요한 인자 추출
-        await extract_parameters_from_text(query_type, user_text, fields_to_extract, request_time, query_context.current_parameters)
+        is_updated = await update_current_parameters(query_type, user_text, fields_to_extract, request_time, query_context.current_parameters)
+        if (is_updated == -1):
+            print("인자 업데이트 실패!")
+            return query_context
         missing_args = check_arg(query_type, query_context.current_parameters)
         if (len(missing_args) > 0):
             query_context.response_message = await parameter_request_message(query_context.query_type, missing_args)
@@ -234,7 +272,7 @@ async def handle_range_query(query_context: query_context.ScheduleQueryContext):
         # 첫번째로 필수 인자 및 필요인자 체크
         fields_to_extract = list_to_extract(query_type, query_context.current_parameters)
         # 2차 분석 단계에서 필요한 인자 추출
-        await extract_parameters_from_text(query_type, user_text, fields_to_extract, request_time, query_context.current_parameters)
+        await update_current_parameters(query_type, user_text, fields_to_extract, request_time, query_context.current_parameters)
         # 인자 부재시 디폴트값 삽입
         if (query_context.current_parameters["start_time"] == None):
             query_context.current_parameters["start_time"] = request_time

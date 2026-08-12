@@ -4,6 +4,7 @@ pydantic >= 0.1.0
 pydantic-settings >= 0.1.0
 python-dotenv >= 0.1.0
 requests >= 0.1.0
+httpx >= 0.1.0
 python-multipart==0.0.32
 aiomysql==0.3.2
 cryptography==49.0.0
