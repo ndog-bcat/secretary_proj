@@ -3,9 +3,10 @@
 # process_text_query: db_process.py에서 받아온 쿼리 결과를 분석하여 자연어로 변환 후 반환
 import httpx
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
+from uuid import uuid4
 from service import db_process, query_context
-from service.query_context import next_step_mapping, parameter_templates, mandatory_parameters, optional_parameters, QUERY_PARAMETER_SPECS
+from service.query_context import next_step_mapping, parameter_templates, mandatory_parameters, optional_parameters
 from copy import deepcopy
 
 OLLAMA_URL = "http://localhost:11434/api/generate"
@@ -146,19 +147,28 @@ async def parameter_request_message(query_type: int, required_args: list[str]) -
         return f"{', '.join(required_args)}이(가) 누락되었습니다. 루틴 수정에 필요한 정보를 알려주세요."
 
 async def extract_parameters_from_text(query_type: int, user_text: str, required_args: list[str], request_time: str, current_parameters: dict) -> dict:
-    non_targeting_prompt = (f"""
-        역할: 일정 요청에서 DB 처리에 필요한 값만 추출한다.
+    prompt = (f"""
+        역할: 사용자의 일정 요청에서 현재 단계에 필요한 필드만 추출한다.
 
         쿼리 유형: {query_type}
         기준 시각: {request_time}
-        추출할 필드: {required_args}
+        현재 단계에서 추출할 필드: {required_args}
         이미 수집한 값: {current_parameters}
+
+        쿼리 유형:
+        0 = 하루 조회
+        1 = 기간 조회
+        2 = 일정 삽입
+        3 = 루틴 삽입
+        4 = 일정 수정
+        5 = 루틴 수정
+        6 = 일정 삭제
+        7 = 루틴 삭제
 
         필드 형식:
         - target_date: YYYY-MM-DD
-        - start_time, end_time:
-          · 일정과 기간 조회는 YYYY-MM-DD HH:MM:SS
-          · 반복 루틴은 HH:MM:SS
+        - 일정의 start_time, end_time: YYYY-MM-DD HH:MM:SS
+        - 루틴의 start_time, end_time: HH:MM:SS
         - business: 일정 또는 루틴의 핵심 내용 문자열
         - location: 장소 문자열
         - who: 사람 이름 문자열 배열
@@ -166,11 +176,19 @@ async def extract_parameters_from_text(query_type: int, user_text: str, required
         - start_date, end_date: YYYY-MM-DD
 
         규칙:
+        - 반드시 "현재 단계에서 추출할 필드"에 있는 키만 처리한다.
+        - 타겟팅 단계에서 target_date만 주어지면 기존 일정의 날짜만 추출한다.
+        - 타겟팅 단계에서 days_of_week만 주어지면 기존 루틴의 요일만 추출한다.
+        - 수정 단계에서는 전달된 수정 필드에 대해 사용자가 새로 바꾸려는 값만 추출한다.
+        - 기존 대상을 설명하는 값과 새로 변경할 값을 혼동하지 않는다.
+        - schedule_id와 routine_group_id는 사용자 문장으로 추측하거나 생성하지 않는다.
         - 오늘, 내일, 모레 같은 상대 날짜는 기준 시각으로 계산한다.
         - 오전과 오후를 구분하여 24시간제로 변환한다.
         - 매일은 [0,1,2,3,4,5,6], 평일은 [1,2,3,4,5], 주말은 [0,6]이다.
+        - 기간 조회의 end_time은 조회에 포함되지 않는 종료 경계다.
+        - “이번 주”는 이번 주 월요일 00:00:00부터 다음 주 월요일 00:00:00까지다.
         - 사용자가 말하지 않은 값은 추측하지 말고 null로 반환한다.
-        - 추출할 필드에 없는 키는 반환하지 않는다.
+        - 장소, 동반자, 종료 시각을 지우라는 요청은 해당 필드 값을 null로 반환한다.
         - 설명이나 마크다운을 붙이지 않는다.
 
         다음 형식의 JSON만 반환한다:
@@ -179,45 +197,6 @@ async def extract_parameters_from_text(query_type: int, user_text: str, required
         사용자 요청: {user_text}
         """
         )
-
-    targeting_prompt = (f"""
-        역할: 수정 또는 삭제 요청에서 후보 탐색 정보와 수정 정보를 분리해 추출한다.
-
-        쿼리 유형: {query_type}
-        기준 시각: {request_time}
-        이미 수집한 값: {current_parameters}
-
-        타겟팅 규칙:
-        - 일정 수정·삭제(4, 6)는 기존 일정이 있는 날짜만 target_date로 추출한다.
-        - 루틴 수정·삭제(5, 7)는 기존 루틴의 요일만 days_of_week로 추출한다.
-        - 후보는 날짜 또는 요일로 조회하므로 내용, 시간, 장소로 후보를 좁히지 않는다.
-        - schedule_id와 routine_group_id는 서버가 후보 선택 후 결정하므로 생성하지 않는다.
-
-        수정 규칙:
-        - 수정 요청(4, 5)이면 사용자가 새로 바꾸려는 값만 update_information에 넣는다.
-        - 기존 대상을 설명한 값과 새 값이 섞이지 않게 한다.
-        - 일정 시각은 YYYY-MM-DD HH:MM:SS 형식이다.
-        - 루틴 시각은 HH:MM:SS 형식이다.
-        - 요일 번호는 0=일, 1=월, 2=화, 3=수, 4=목, 5=금, 6=토다.
-        - 장소, 동반자, 종료 시각을 지우라는 요청은 해당 값을 null로 넣는다.
-        - 삭제 요청(6, 7)의 update_information은 빈 객체다.
-        - 사용자가 말하지 않은 값은 추측하지 않는다.
-
-        예시:
-        "내일 일정을 3시로 바꿔줘"
-        -> {{"target": {{"target_date": "기준 시각으로 계산한 날짜"}}, "update_information": {{"start_time": "해당 날짜 15:00:00"}}}}
-
-        "월수금 루틴을 화목으로 바꿔줘"
-        -> {{"target": {{"days_of_week": [1,3,5]}}, "update_information": {{"days_of_week": [2,4]}}}}
-
-        결과를 다음 객체에 넣어 JSON만 반환한다:
-        {{"extract_result": {{"target": {{}}, "update_information": {{}}}}}}
-
-        사용자 요청: {user_text}
-        """
-        )
-
-    prompt = non_targeting_prompt if query_type < 4 else targeting_prompt
 
     payload = {
         "model": "qwen2.5-coder:7b",
@@ -240,16 +219,157 @@ async def extract_parameters_from_text(query_type: int, user_text: str, required
         return {"result": "extract fail"}
 
 async def update_current_parameters(query_type: int, user_text: str, required_args: list[str], request_time: str, current_parameters: dict) -> int:
-    extracted_parameters = extract_parameters_from_text(query_type, user_text, required_args, request_time, current_parameters)
+    extracted_parameters = await extract_parameters_from_text(query_type, user_text, required_args, request_time, current_parameters)
     is_success = False if (extracted_parameters.get("result") == "extract fail") else True
     if (is_success == False):
         print("인자 추출 중 오류가 발생했습니다.")
         return -1
     else:
-        for key in extracted_parameters.keys():
-            if (current_parameters[key] == None and extracted_parameters[key] != None):
+        for key in current_parameters.keys():
+            if (
+                key in extracted_parameters
+                and current_parameters[key] is None
+                and extracted_parameters[key] is not None
+            ):
                 current_parameters[key] = extracted_parameters[key]
         return 1
+
+def routine_occurs_on(routine: dict, occurrence_date) -> bool:
+    days_of_week = routine.get("days_of_week")
+    if days_of_week is None:
+        days_of_week = [routine["day_of_week"]]
+
+    project_weekday = (occurrence_date.weekday() + 1) % 7
+    if project_weekday not in days_of_week:
+        return False
+
+    start_date = routine.get("start_date")
+    end_date = routine.get("end_date")
+    if start_date is not None and occurrence_date < db_process.parse_to_date(start_date):
+        return False
+    if end_date is not None and occurrence_date > db_process.parse_to_date(end_date):
+        return False
+    return True
+
+def routine_occurrence_bounds(routine: dict, occurrence_date):
+    start_time = db_process.parse_to_time(routine["start_time"])
+    start_dt = datetime.combine(occurrence_date, start_time)
+    if routine.get("end_time") is None:
+        return start_dt, start_dt + db_process.DEFAULT_DURATION
+
+    end_time = db_process.parse_to_time(routine["end_time"])
+    end_dt = datetime.combine(occurrence_date, end_time)
+    if end_time < start_time:
+        end_dt += timedelta(days=1)
+    return start_dt, end_dt
+
+async def get_collision(user_id: str, query_type: int, current_parameters: dict) -> list[dict]:
+    candidates = await db_process.process_collision_query(
+        user_id,
+        query_type,
+        current_parameters,
+    )
+    if candidates.get("status") != "success":
+        raise RuntimeError(candidates.get("message", "충돌 후보 조회에 실패했습니다."))
+
+    schedules = candidates["schedules"]
+    routines = candidates["routines"]
+
+    if query_type == 4:
+        schedule_id = current_parameters["schedule_id"]
+        schedules = [
+            item
+            for item in schedules
+            if item["Schedule_ID"] != schedule_id
+        ]
+
+    if query_type in (2, 4):
+        return schedules + routines
+
+    new_routine = current_parameters
+    collision_result = []
+
+    # 기존 일정이 새 루틴의 실제 발생분과 겹치는지 확인
+    for item in schedules:
+        schedule_start = db_process.parse_to_datetime(item["start_time"])
+        schedule_end = (
+            schedule_start + db_process.DEFAULT_DURATION
+            if item.get("end_time") is None
+            else db_process.parse_to_datetime(item["end_time"])
+        )
+        occurrence_date = schedule_start.date() - timedelta(days=1)
+        while occurrence_date <= schedule_end.date():
+            if routine_occurs_on(new_routine, occurrence_date):
+                routine_start, routine_end = routine_occurrence_bounds(
+                    new_routine,
+                    occurrence_date,
+                )
+                if routine_start < schedule_end and routine_end > schedule_start:
+                    collision_result.append(item)
+                    break
+            occurrence_date += timedelta(days=1)
+
+    # 기존 루틴과 새 루틴이 실제로 함께 발생하는 날짜 확인
+    for item in routines:
+        if (
+            query_type == 5
+            and item["Routine_Group_ID"]
+            == current_parameters["routine_group_id"]
+        ):
+            continue
+
+        reference_dates = [datetime.now().date()]
+        for value in (new_routine.get("start_date"), item.get("start_date")):
+            if value is not None:
+                reference_dates.append(db_process.parse_to_date(value))
+        reference_date = max(reference_dates)
+
+        has_collision = False
+        for day_offset in range(-1, 8):
+            new_occurrence_date = reference_date + timedelta(days=day_offset)
+            if not routine_occurs_on(new_routine, new_occurrence_date):
+                continue
+
+            new_start, new_end = routine_occurrence_bounds(
+                new_routine,
+                new_occurrence_date,
+            )
+            for old_day_offset in (-1, 0, 1):
+                old_occurrence_date = (
+                    new_occurrence_date + timedelta(days=old_day_offset)
+                )
+                if not routine_occurs_on(item, old_occurrence_date):
+                    continue
+
+                old_start, old_end = routine_occurrence_bounds(
+                    item,
+                    old_occurrence_date,
+                )
+                if new_start < old_end and new_end > old_start:
+                    has_collision = True
+                    break
+            if has_collision:
+                collision_result.append(item)
+                break
+
+    return collision_result
+
+async def collision_decision_request(query_type: int, collision_list: list[dict]) -> str:
+    lines = []
+    for index, item in enumerate(collision_list, start=1):
+        item_type = "일정" if "Schedule_ID" in item else "루틴"
+        location = f" / 장소: {item['location']}" if item.get("location") else ""
+        lines.append(
+            f"{index}. [{item_type}] "
+            f"{item.get('start_time')} ~ {item.get('end_time')}"
+            f" / {item.get('business')}{location}"
+        )
+
+    return (
+        "다음 일정 또는 루틴과 시간이 겹칩니다.\n"
+        + "\n".join(lines)
+        + "\n무시하고 이대로 삽입하려면 '진행', 삽입하지 않으려면 '폐기'라고 단어만으로 말씀해주세요."
+    )
 
 async def request_date_info() -> str:
     return
@@ -260,10 +380,6 @@ async def request_weekday_info() -> str:
 async def targeting() -> str:
     target_id = None
     return
-
-async def collission_check() -> dict:
-    collision_schedule = {}
-    return collision_schedule
 
 async def create_final_response(db_result: dict, query_type: int) -> str:
     if db_result.get("status") != "success":
@@ -276,9 +392,47 @@ async def create_final_response(db_result: dict, query_type: int) -> str:
     target_date = db_result.get("target_date")
 
     if not timeline:
-        return f"{target_date}에는 등록된 일정이나 루틴이 없습니다."
+        if query_type == 0:
+            return f"{target_date}에는 등록된 일정이나 루틴이 없습니다."
 
-    # timeline 포맷팅
+        query_range = db_result.get("range", {})
+        return (
+            f"{query_range.get('start_time')}부터 "
+            f"{query_range.get('end_time')}까지 등록된 일정이나 루틴이 없습니다."
+        )
+
+    lines = []
+
+    for item in timeline:
+        schedule_type = "일정" if item["type"] == "schedule" else "루틴"
+        location = (
+            f" / 장소: {item['location']}"
+            if item.get("location")
+            else ""
+        )
+        who = (
+            f" / 함께하는 사람: {', '.join(item['who'])}"
+            if item.get("who")
+            else ""
+        )
+        inferred = " (종료 시각 추정)" if item.get("end_time_inferred") else ""
+
+        lines.append(
+            f"- [{schedule_type}] "
+            f"{item['start_time']} ~ {item['end_time']}{inferred}"
+            f" / {item['business']}{location}{who}"
+        )
+
+    if query_type == 0:
+        title = f"{target_date}의 일정입니다."
+    else:
+        query_range = db_result.get("range", {})
+        title = (
+            f"{query_range.get('start_time')}부터 "
+            f"{query_range.get('end_time')}까지의 일정입니다."
+        )
+
+    return f"{title}\n" + "\n".join(lines)
 
 async def handle_day_query(query_context: query_context.ScheduleQueryContext):
     user_id = query_context.user_id
@@ -294,8 +448,8 @@ async def handle_day_query(query_context: query_context.ScheduleQueryContext):
         fields_to_extract = list_to_extract(query_type, query_context.current_parameters)
         # 2차 분석 단계에서 필요한 인자 추출
         is_updated = await update_current_parameters(query_type, user_text, fields_to_extract, request_time, query_context.current_parameters)
-        if (is_updated == -1):
-            print("인자 업데이트 실패!")
+        if is_updated == -1:
+            query_context.response_message = "요청 내용을 분석하지 못했습니다. 다시 말씀해주세요."
             return query_context
         missing_args = check_arg(query_type, query_context.current_parameters)
         if (len(missing_args) > 0):
@@ -322,12 +476,15 @@ async def handle_range_query(query_context: query_context.ScheduleQueryContext):
         # 첫번째로 필수 인자 및 필요인자 체크
         fields_to_extract = list_to_extract(query_type, query_context.current_parameters)
         # 2차 분석 단계에서 필요한 인자 추출
-        await update_current_parameters(query_type, user_text, fields_to_extract, request_time, query_context.current_parameters)
+        is_updated = await update_current_parameters(query_type, user_text, fields_to_extract, request_time, query_context.current_parameters)
+        if is_updated == -1:
+            query_context.response_message = "요청 내용을 분석하지 못했습니다. 다시 말씀해주세요."
+            return query_context
         # 인자 부재시 디폴트값 삽입
         if (query_context.current_parameters["start_time"] == None):
             query_context.current_parameters["start_time"] = request_time
         if (query_context.current_parameters["end_time"] == None):
-            query_context.current_parameters["end_time"] = datetime.strftime(datetime.strptime(request_time, "%Y-%m-%d 00:00:00") + datetime.timedelta(days=1))
+            query_context.current_parameters["end_time"] = (datetime.strptime(request_time, "%Y-%m-%d %H:%M:%S").replace(hour=0, minute=0, second=0) + timedelta(days=1)).strftime("%Y-%m-%d %H:%M:%S")
     # 2. DB 조회
     db_result = await db_process.process_db_query(user_id, query_type, query_context.current_parameters)
     # 3. 조회 성공 or 실패 답변 반환
@@ -336,42 +493,107 @@ async def handle_range_query(query_context: query_context.ScheduleQueryContext):
     return query_context
 
 async def handle_schedule_insert(query_context: query_context.ScheduleQueryContext):
+    user_id = query_context.user_id
+    query_type = query_context.query_type
+    user_text = query_context.user_text
+    request_time = query_context.request_time
+    # 종료상태에서 재진입 시 바로 반환
+    if query_context.pending_step == "done":
+        return query_context
     # 1. 필수 인자(재질문)
     if (query_context.pending_step == "waiting_parameters"):
         # 첫번째로 필수 인자 및 필요인자 체크
+        fields_to_extract = list_to_extract(query_type, query_context.current_parameters)
         # 2차 분석 단계에서 필요한 인자 추출
-        # 예: 시작 날짜, 종료 날짜, 일정 종류 등
-        # 2. 충돌검사 후에 다음단계
-        pass
+        is_updated = await update_current_parameters(query_type, user_text, fields_to_extract, request_time, query_context.current_parameters)
+        if is_updated == -1:
+            query_context.response_message = "요청 내용을 분석하지 못했습니다. 다시 말씀해주세요."
+            return query_context
+        missing_args = check_arg(query_type, query_context.current_parameters)
+        if (len(missing_args) > 0):
+            query_context.response_message = await parameter_request_message(query_context.query_type, missing_args)
+            return query_context
+
     if (query_context.pending_step == "waiting_collision_decision"):
-        # 충돌검사의 결과에 대한 사용자의 선택에 따른 처리
-        # 예: 충돌 무시하고 삽입, 충돌 해결 후 삽입, 삽입 취소 등
-        pass
+        decision = user_text.strip().replace(" ", "")
+        if decision == "폐기":
+            query_context.response_message = "일정 삽입을 종료하였습니다."
+            query_context.pending_step = "done"
+            return query_context
+        if decision != "진행":
+            query_context.response_message = (
+                "일정 삽입을 계속하려면 '진행', 삽입하지 않으려면 "
+                "'폐기'라고 말씀해주세요."
+            )
+            return query_context
+    else:
+        collision_list = await get_collision(user_id, query_type, query_context.current_parameters)
+        if (len(collision_list) > 0):
+            query_context.response_message = await collision_decision_request(query_context.query_type, collision_list)
+            query_context.pending_step = "waiting_collision_decision"
+            return query_context
+
+    db_result = await db_process.process_db_query(user_id, query_type, query_context.current_parameters)
+    if (db_result["status"] == "success"):
+        query_context.response_message = "일정 삽입에 성공하였습니다."
+    else:
+        query_context.response_message = "db 오류로 인해 일정삽입에 실패하였습니다."
     # 3. 삽입 성공 or 충돌 답변 반환
-    if (query_context.pending_step == "completed"):
-        pass
-    if (query_context.pending_step == "failed"):
-        pass
-    return
+    query_context.pending_step = "done"
+    return query_context
 
 async def handle_routine_insert(query_context: query_context.ScheduleQueryContext):
+    user_id = query_context.user_id
+    query_type = query_context.query_type
+    user_text = query_context.user_text
+    request_time = query_context.request_time
+    # 종료상태에서 재진입 시 바로 반환
+    if query_context.pending_step == "done":
+        return query_context
     # 1. 필수 인자(재질문)
     if (query_context.pending_step == "waiting_parameters"):
         # 첫번째로 필수 인자 및 필요인자 체크
+        fields_to_extract = list_to_extract(query_type, query_context.current_parameters)
         # 2차 분석 단계에서 필요한 인자 추출
-        # 예: 시작 날짜, 종료 날짜, 일정 종류 등
-        # 2. 충돌검사 후에 다음단계
-        pass
+        is_updated = await update_current_parameters(query_type, user_text, fields_to_extract, request_time, query_context.current_parameters)
+        if is_updated == -1:
+            query_context.response_message = "요청 내용을 분석하지 못했습니다. 다시 말씀해주세요."
+            return query_context
+        missing_args = check_arg(query_type, query_context.current_parameters)
+        if (len(missing_args) > 0):
+            query_context.response_message = await parameter_request_message(query_context.query_type, missing_args)
+            return query_context
+
     if (query_context.pending_step == "waiting_collision_decision"):
-        # 충돌검사의 결과에 대한 사용자의 선택에 따른 처리
-        # 예: 충돌 무시하고 삽입, 충돌 해결 후 삽입, 삽입 취소 등
-        pass
+        decision = user_text.strip().replace(" ", "")
+        if decision == "폐기":
+            query_context.response_message = "루틴 삽입을 종료하였습니다."
+            query_context.pending_step = "done"
+            return query_context
+        if decision != "진행":
+            query_context.response_message = (
+                "루틴 삽입을 계속하려면 '진행', 삽입하지 않으려면 "
+                "'폐기'라고 말씀해주세요."
+            )
+            return query_context
+    else:
+        collision_list = await get_collision(user_id, query_type, query_context.current_parameters)
+        if (len(collision_list) > 0):
+            query_context.response_message = await collision_decision_request(query_context.query_type, collision_list)
+            query_context.pending_step = "waiting_collision_decision"
+            return query_context
+
+    if query_context.current_parameters["routine_group_id"] is None:
+        query_context.current_parameters["routine_group_id"] = str(uuid4())
+
+    db_result = await db_process.process_db_query(user_id, query_type, query_context.current_parameters)
+    if (db_result["status"] == "success"):
+        query_context.response_message = "루틴 삽입에 성공하였습니다."
+    else:
+        query_context.response_message = "db 오류로 인해 루틴 삽입에 실패하였습니다."
     # 3. 삽입 성공 or 충돌 답변 반환
-    if (query_context.pending_step == "completed"):
-        pass
-    if (query_context.pending_step == "failed"):
-        pass
-    return
+    query_context.pending_step = "done"
+    return query_context
 
 async def handle_schedule_update(query_context: query_context.ScheduleQueryContext):
     # 1-1. 타겟팅(현재기준 일정 존재하는 날짜 후보 제공 후 선택)

@@ -1210,6 +1210,57 @@ QUERY_HANDLERS = {
     7: delete_routine,
 }
 
+async def get_schedule_collision_candidates(conn, user_id, args):
+    start_dt = parse_to_datetime(args.get("start_time"))
+    end_dt = (
+        None
+        if args.get("end_time") is None
+        else parse_to_datetime(args.get("end_time"))
+    )
+    schedules = await select_overlapping_schedules(
+        conn,
+        user_id,
+        start_dt,
+        end_dt,
+    )
+    routines = await select_overlapping_routines(
+        conn,
+        user_id,
+        start_dt.date(),
+        start_dt.time(),
+        None if end_dt is None else end_dt.time(),
+    )
+    return {
+        "status": "success",
+        "schedules": schedules,
+        "routines": routines,
+    }
+
+async def get_routine_collision_candidates(conn, user_id, args):
+    schedules = await select_schedules_for_routine_conflict(
+        conn,
+        user_id,
+        args.get("start_date"),
+        args.get("end_date"),
+    )
+    routines = await select_routines_for_recurrence_conflict(
+        conn,
+        user_id,
+        args.get("start_date"),
+        args.get("end_date"),
+    )
+    return {
+        "status": "success",
+        "schedules": schedules,
+        "routines": routines,
+    }
+
+COLLISION_HANDLERS = {
+    2: get_schedule_collision_candidates,
+    3: get_routine_collision_candidates,
+    4: get_schedule_collision_candidates,
+    5: get_routine_collision_candidates
+}
 
 # ==========================================
 # 4. 통합 엔트리 포인트 및 정기 청소
@@ -1233,6 +1284,25 @@ async def process_db_query(user_id: str, query_type: int, query_args: dict) -> d
                 "status": "error",
                 "query_type": query_type,
                 "message": f"DB 처리 중 에러 발생: {exc}",
+            }
+
+async def process_collision_query(user_id: str, query_type: int, query_args: dict) -> dict:
+    handler = COLLISION_HANDLERS.get(query_type)
+    if handler is None:
+        return {"status": "error", "message": "알 수 없는 쿼리 타입입니다."}
+    if connection.db_pool is None:
+        return {"status": "error", "message": "DB 연결 풀이 초기화되지 않았습니다."}
+    
+    async with connection.db_pool.acquire() as conn:
+        try:
+            result = await handler(conn, user_id, query_args or {})
+            return result
+        except Exception as exc:
+            await conn.rollback()
+            return {
+                "status": "error",
+                "query_type": query_type,
+                "message": f"충돌 검사 중 에러 발생: {exc}",
             }
 
 async def cleanup_expired_data() -> dict:
