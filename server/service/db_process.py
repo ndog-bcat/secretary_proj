@@ -267,6 +267,25 @@ select_routines_by_weekdays_sql = """
     ORDER BY r.day_of_week ASC, r.start_time ASC, r.Routine_ID ASC;
 """
 
+# [타겟팅] 선택된 루틴 그룹의 전체 튜플 조회
+# 입력: (routine_group_id, user_id)
+select_routine_group_sql = """
+    SELECT Routine_ID,
+           Routine_Group_ID,
+           start_time,
+           end_time,
+           location,
+           business,
+           who,
+           day_of_week,
+           start_date,
+           end_date
+    FROM Routine
+    WHERE Routine_Group_ID = %s
+      AND User_ID = %s
+    ORDER BY day_of_week ASC, Routine_ID ASC;
+"""
+
 # [타겟팅] 현재 시각 이후 일정이 존재하는 날짜 후보 조회
 # 입력: (reference_time, user_id)
 # 여러 날에 걸친 일정은 실제로 걸치는 모든 날짜를 반환
@@ -1284,6 +1303,129 @@ async def process_db_query(user_id: str, query_type: int, query_args: dict) -> d
                 "status": "error",
                 "query_type": query_type,
                 "message": f"DB 처리 중 에러 발생: {exc}",
+            }
+
+async def process_target_day_query(
+    user_id: str,
+    query_type: int,
+    request_time,
+) -> dict:
+    """수정·삭제 타겟팅에 사용할 일정 날짜 또는 루틴 요일 후보를 반환합니다."""
+    if query_type not in (4, 5, 6, 7):
+        return {"status": "error", "message": "타겟팅 대상이 아닌 쿼리 타입입니다."}
+    if connection.db_pool is None:
+        return {"status": "error", "message": "DB 연결 풀이 초기화되지 않았습니다."}
+
+    async with connection.db_pool.acquire() as conn:
+        try:
+            if query_type in (4, 6):
+                candidates = await select_future_schedule_dates(
+                    conn,
+                    user_id,
+                    request_time,
+                )
+            else:
+                candidates = await select_active_routine_weekdays(
+                    conn,
+                    user_id,
+                    request_time,
+                )
+
+            return {
+                "status": "success",
+                "query_type": query_type,
+                "candidates": candidates,
+            }
+        except Exception as exc:
+            await conn.rollback()
+            return {
+                "status": "error",
+                "query_type": query_type,
+                "message": f"타겟팅 날짜/요일 조회 중 에러 발생: {exc}",
+            }
+
+async def process_target_candidates_query(
+    user_id: str,
+    query_type: int,
+    time_info,
+    request_time,
+) -> dict:
+    """확정된 날짜 또는 요일에 속하는 수정·삭제 대상 후보를 반환합니다."""
+    if query_type not in (4, 5, 6, 7):
+        return {"status": "error", "message": "타겟팅 대상이 아닌 쿼리 타입입니다."}
+    if connection.db_pool is None:
+        return {"status": "error", "message": "DB 연결 풀이 초기화되지 않았습니다."}
+
+    async with connection.db_pool.acquire() as conn:
+        try:
+            if query_type in (4, 6):
+                target_date = parse_to_date(time_info)
+                request_dt = parse_to_datetime(request_time)
+                day_start = datetime.combine(target_date, time.min)
+                day_end = day_start + timedelta(days=1)
+                range_start = max(day_start, request_dt)
+
+                if range_start >= day_end:
+                    candidates = []
+                else:
+                    async with conn.cursor(aiomysql.DictCursor) as cur:
+                        await cur.execute(
+                            select_schedule_by_date_sql,
+                            (user_id, day_end, range_start),
+                        )
+                        rows = await cur.fetchall()
+                    candidates = normalize_db_rows(rows)
+            else:
+                days_of_week = (
+                    [time_info]
+                    if isinstance(time_info, int)
+                    else time_info
+                )
+                candidates = await select_routines_by_weekdays(
+                    conn,
+                    user_id,
+                    days_of_week,
+                    request_time,
+                )
+
+            return {
+                "status": "success",
+                "query_type": query_type,
+                "candidates": candidates,
+            }
+        except Exception as exc:
+            await conn.rollback()
+            return {
+                "status": "error",
+                "query_type": query_type,
+                "message": f"타겟팅 후보 조회 중 에러 발생: {exc}",
+            }
+
+async def process_routine_group_query(
+    user_id: str,
+    routine_group_id: str,
+) -> dict:
+    """선택된 루틴 그룹의 전체 요일 튜플을 반환합니다."""
+    if connection.db_pool is None:
+        return {"status": "error", "message": "DB 연결 풀이 초기화되지 않았습니다."}
+
+    async with connection.db_pool.acquire() as conn:
+        try:
+            async with conn.cursor(aiomysql.DictCursor) as cur:
+                await cur.execute(
+                    select_routine_group_sql,
+                    (routine_group_id, user_id),
+                )
+                rows = await cur.fetchall()
+            return {
+                "status": "success",
+                "candidates": normalize_db_rows(rows),
+            }
+        except Exception as exc:
+            await conn.rollback()
+            return {
+                "status": "error",
+                "message": f"루틴 그룹 조회 중 에러 발생: {exc}",
             }
 
 async def process_collision_query(user_id: str, query_type: int, query_args: dict) -> dict:

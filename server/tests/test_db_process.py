@@ -450,6 +450,172 @@ class CrudBindingTests(unittest.IsolatedAsyncioTestCase):
 
 
 class TargetingAndConflictCandidateTests(unittest.IsolatedAsyncioTestCase):
+    async def test_process_routine_group_query_returns_all_group_rows(self):
+        rows = [
+            {
+                "Routine_ID": 10,
+                "Routine_Group_ID": "group-10",
+                "day_of_week": 1,
+                "start_time": time(10),
+                "end_time": time(11),
+                "business": "운동",
+                "location": None,
+                "who": '["민수"]',
+                "start_date": None,
+                "end_date": None,
+            },
+            {
+                "Routine_ID": 11,
+                "Routine_Group_ID": "group-10",
+                "day_of_week": 3,
+                "start_time": time(10),
+                "end_time": time(11),
+                "business": "운동",
+                "location": None,
+                "who": '["민수"]',
+                "start_date": None,
+                "end_date": None,
+            },
+        ]
+        conn = FakeConnection(
+            results={db_process.select_routine_group_sql: [rows]}
+        )
+        original_pool = db_process.connection.db_pool
+
+        try:
+            db_process.connection.db_pool = FakePool(conn)
+            result = await db_process.process_routine_group_query(
+                "user-1",
+                "group-10",
+            )
+        finally:
+            db_process.connection.db_pool = original_pool
+
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(
+            [row["day_of_week"] for row in result["candidates"]],
+            [1, 3],
+        )
+        self.assertEqual(result["candidates"][0]["who"], ["민수"])
+        self.assertEqual(conn.calls[0][1], ("group-10", "user-1"))
+
+    async def test_process_target_candidates_query_returns_raw_schedule_rows(self):
+        schedule_row = {
+            "Schedule_ID": 20,
+            "start_time": datetime(2026, 8, 17, 8, 0),
+            "end_time": None,
+            "location": "홍대",
+            "business": "회의",
+            "who": '["민수"]',
+        }
+        conn = FakeConnection(
+            results={db_process.select_schedule_by_date_sql: [[schedule_row]]}
+        )
+        original_pool = db_process.connection.db_pool
+
+        try:
+            db_process.connection.db_pool = FakePool(conn)
+            result = await db_process.process_target_candidates_query(
+                "user-1",
+                4,
+                "2026-08-17",
+                "2026-08-17 09:00:00",
+            )
+        finally:
+            db_process.connection.db_pool = original_pool
+
+        self.assertEqual(result["status"], "success")
+        self.assertIsNone(result["candidates"][0]["end_time"])
+        self.assertEqual(result["candidates"][0]["who"], ["민수"])
+        self.assertEqual(
+            conn.calls[0][1],
+            (
+                "user-1",
+                datetime(2026, 8, 18),
+                datetime(2026, 8, 17, 9),
+            ),
+        )
+
+    async def test_process_target_candidates_query_routes_routine_weekday(self):
+        routine_row = {
+            "Routine_ID": 10,
+            "Routine_Group_ID": "group-10",
+            "day_of_week": 1,
+            "start_time": time(10),
+            "end_time": time(11),
+            "business": "운동",
+            "location": None,
+            "who": None,
+            "start_date": None,
+            "end_date": None,
+        }
+        conn = FakeConnection(
+            results={db_process.select_routines_by_weekdays_sql: [[routine_row]]}
+        )
+        original_pool = db_process.connection.db_pool
+
+        try:
+            db_process.connection.db_pool = FakePool(conn)
+            result = await db_process.process_target_candidates_query(
+                "user-1",
+                5,
+                1,
+                "2026-08-17 09:00:00",
+            )
+        finally:
+            db_process.connection.db_pool = original_pool
+
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(result["candidates"][0]["Routine_Group_ID"], "group-10")
+        self.assertEqual(
+            conn.calls[0][1],
+            ("[1]", datetime(2026, 8, 17, 9), "user-1"),
+        )
+
+    async def test_process_target_day_query_routes_schedule_and_routine(self):
+        schedule_conn = FakeConnection(
+            results={
+                db_process.select_future_schedule_dates_sql: [[
+                    {"target_date": date(2026, 8, 17)},
+                    {"target_date": date(2026, 8, 19)},
+                ]]
+            }
+        )
+        routine_conn = FakeConnection(
+            results={
+                db_process.select_active_routine_weekdays_sql: [[
+                    {"target_day": 1},
+                    {"target_day": 3},
+                ]]
+            }
+        )
+        original_pool = db_process.connection.db_pool
+
+        try:
+            db_process.connection.db_pool = FakePool(schedule_conn)
+            schedule_result = await db_process.process_target_day_query(
+                "user-1",
+                4,
+                "2026-08-17 09:00:00",
+            )
+
+            db_process.connection.db_pool = FakePool(routine_conn)
+            routine_result = await db_process.process_target_day_query(
+                "user-1",
+                5,
+                "2026-08-17 09:00:00",
+            )
+        finally:
+            db_process.connection.db_pool = original_pool
+
+        self.assertEqual(schedule_result["status"], "success")
+        self.assertEqual(
+            schedule_result["candidates"],
+            ["2026-08-17", "2026-08-19"],
+        )
+        self.assertEqual(routine_result["status"], "success")
+        self.assertEqual(routine_result["candidates"], [1, 3])
+
     async def test_future_schedule_dates_binding_and_normalization(self):
         conn = FakeConnection(
             results={

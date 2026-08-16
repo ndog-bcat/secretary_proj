@@ -25,8 +25,8 @@ next_step_mapping = {
     1: "waiting_parameters",
     2: "waiting_parameters",
     3: "waiting_parameters",
-    4: "waiting_to_pick_day",
-    5: "waiting_to_pick_weekday",
+    4: "waiting_initial_extraction",
+    5: "waiting_initial_extraction",
     6: "waiting_to_pick_day",
     7: "waiting_to_pick_weekday"
 }

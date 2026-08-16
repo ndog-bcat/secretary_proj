@@ -269,5 +269,424 @@ class PromptContractTests(unittest.TestCase):
         )
 
 
+class ScheduleUpdateAssemblyTests(unittest.IsolatedAsyncioTestCase):
+    async def test_waiting_parameters_skips_extraction_when_update_already_exists(self):
+        context = query_context.ScheduleQueryContext(
+            user_id="user-1",
+            request_time="2026-08-17 09:00:00",
+            user_text="이전 단계 응답",
+            query_type=4,
+            pending_step="waiting_parameters",
+            current_parameters={
+                "schedule_id": 10,
+                "start_time": "2026-08-18 10:00:00",
+                "end_time": None,
+                "business": "회의",
+                "location": "회사",
+                "who": None,
+            },
+            update_parameters={"location": "홍대"},
+        )
+        extract_mock = AsyncMock(return_value={"business": "잘못된 추출"})
+
+        with (
+            patch.object(
+                text_process,
+                "extract_update_parameters",
+                new=extract_mock,
+            ),
+            patch.object(
+                text_process,
+                "get_collision",
+                new=AsyncMock(return_value=[]),
+            ),
+            patch.object(
+                text_process.db_process,
+                "process_db_query",
+                new=AsyncMock(return_value={"status": "success"}),
+            ),
+        ):
+            result = await text_process.handle_schedule_update(context)
+
+        extract_mock.assert_not_awaited()
+        self.assertEqual(result.pending_step, "done")
+        self.assertEqual(result.current_parameters["location"], "홍대")
+        self.assertEqual(result.current_parameters["business"], "회의")
+
+    async def test_waiting_parameters_extracts_and_applies_update_values(self):
+        context = query_context.ScheduleQueryContext(
+            user_id="user-1",
+            request_time="2026-08-17 09:00:00",
+            user_text="장소를 홍대로 바꿔줘",
+            query_type=4,
+            pending_step="waiting_parameters",
+            current_parameters={
+                "schedule_id": 10,
+                "start_time": "2026-08-18 10:00:00",
+                "end_time": None,
+                "business": "회의",
+                "location": "회사",
+                "who": None,
+            },
+        )
+
+        with (
+            patch.object(
+                text_process,
+                "extract_update_parameters",
+                new=AsyncMock(return_value={"location": "홍대"}),
+            ),
+            patch.object(
+                text_process,
+                "get_collision",
+                new=AsyncMock(return_value=[]),
+            ),
+            patch.object(
+                text_process.db_process,
+                "process_db_query",
+                new=AsyncMock(return_value={"status": "success"}),
+            ),
+        ):
+            result = await text_process.handle_schedule_update(context)
+
+        self.assertEqual(result.pending_step, "done")
+        self.assertEqual(result.update_parameters, {"location": "홍대"})
+        self.assertEqual(result.current_parameters["location"], "홍대")
+
+    async def test_waiting_parameters_reasks_when_no_update_value_is_found(self):
+        context = query_context.ScheduleQueryContext(
+            user_id="user-1",
+            request_time="2026-08-17 09:00:00",
+            user_text="잘 모르겠어",
+            query_type=4,
+            pending_step="waiting_parameters",
+            current_parameters={
+                "schedule_id": 10,
+                "start_time": "2026-08-18 10:00:00",
+                "end_time": None,
+                "business": "회의",
+                "location": None,
+                "who": None,
+            },
+        )
+
+        with patch.object(
+            text_process,
+            "extract_update_parameters",
+            new=AsyncMock(return_value={}),
+        ):
+            result = await text_process.handle_schedule_update(context)
+
+        self.assertEqual(result.pending_step, "waiting_parameters")
+        self.assertEqual(result.response_message, "수정할 정보를 말씀해주세요.")
+        self.assertEqual(result.update_parameters, {})
+
+    async def test_selected_schedule_and_update_values_are_assembled(self):
+        target = {
+            "Schedule_ID": 10,
+            "start_time": "2026-08-18 10:00:00",
+            "end_time": None,
+            "business": "회의",
+            "location": "회사",
+            "who": ["민수"],
+        }
+        context = query_context.ScheduleQueryContext(
+            user_id="user-1",
+            request_time="2026-08-17 09:00:00",
+            user_text="1번",
+            query_type=4,
+            pending_step="waiting_target",
+            target_candidates=[target],
+            update_parameters={
+                "start_time": "2026-08-18 11:00:00",
+                "location": None,
+            },
+        )
+
+        with (
+            patch.object(
+                text_process,
+                "get_collision",
+                new=AsyncMock(return_value=[]),
+            ),
+            patch.object(
+                text_process.db_process,
+                "process_db_query",
+                new=AsyncMock(return_value={"status": "success"}),
+            ),
+        ):
+            result = await text_process.handle_schedule_update(context)
+
+        self.assertEqual(result.pending_step, "done")
+        self.assertEqual(result.selected_targets, [target])
+        self.assertEqual(result.current_parameters["schedule_id"], 10)
+        self.assertEqual(
+            result.current_parameters["start_time"],
+            "2026-08-18 11:00:00",
+        )
+        self.assertIsNone(result.current_parameters["end_time"])
+        self.assertIsNone(result.current_parameters["location"])
+        self.assertEqual(result.current_parameters["business"], "회의")
+
+    async def test_selected_schedule_waits_when_update_values_are_empty(self):
+        target = {
+            "Schedule_ID": 10,
+            "start_time": "2026-08-18 10:00:00",
+            "end_time": None,
+            "business": "회의",
+            "location": None,
+            "who": None,
+        }
+        context = query_context.ScheduleQueryContext(
+            user_id="user-1",
+            request_time="2026-08-17 09:00:00",
+            user_text="1번",
+            query_type=4,
+            pending_step="waiting_target",
+            target_candidates=[target],
+        )
+
+        result = await text_process.handle_schedule_update(context)
+
+        self.assertEqual(result.pending_step, "waiting_parameters")
+        self.assertEqual(result.response_message, "수정할 정보를 말씀해주세요.")
+        self.assertEqual(result.current_parameters["schedule_id"], 10)
+        self.assertIsNone(result.current_parameters["end_time"])
+
+
+class RoutineUpdateAssemblyTests(unittest.IsolatedAsyncioTestCase):
+    async def test_selected_routine_group_is_assembled_and_replaced(self):
+        target = {
+            "Routine_ID": 10,
+            "Routine_Group_ID": "group-10",
+            "day_of_week": 1,
+            "start_time": "10:00:00",
+            "end_time": "11:00:00",
+            "business": "운동",
+            "location": "헬스장",
+            "who": None,
+            "start_date": None,
+            "end_date": None,
+        }
+        group_rows = [
+            target,
+            {**target, "Routine_ID": 11, "day_of_week": 3},
+            {**target, "Routine_ID": 12, "day_of_week": 5},
+        ]
+        context = query_context.ScheduleQueryContext(
+            user_id="user-1",
+            request_time="2026-08-17 09:00:00",
+            user_text="1번",
+            query_type=5,
+            pending_step="waiting_target",
+            target_candidates=[target],
+            update_parameters={
+                "days_of_week": [2, 4],
+                "start_time": "12:00:00",
+            },
+        )
+
+        with (
+            patch.object(
+                text_process.db_process,
+                "process_routine_group_query",
+                new=AsyncMock(return_value={
+                    "status": "success",
+                    "candidates": group_rows,
+                }),
+            ),
+            patch.object(
+                text_process,
+                "get_collision",
+                new=AsyncMock(return_value=[]),
+            ),
+            patch.object(
+                text_process.db_process,
+                "process_db_query",
+                new=AsyncMock(return_value={"status": "success"}),
+            ) as process_db_mock,
+        ):
+            result = await text_process.handle_routine_update(context)
+
+        self.assertEqual(result.pending_step, "done")
+        self.assertEqual(result.selected_targets, group_rows)
+        self.assertEqual(
+            result.current_parameters["routine_group_id"],
+            "group-10",
+        )
+        self.assertEqual(result.current_parameters["days_of_week"], [2, 4])
+        self.assertEqual(result.current_parameters["start_time"], "12:00:00")
+        process_db_mock.assert_awaited_once_with(
+            "user-1",
+            5,
+            result.current_parameters,
+        )
+
+    async def test_weekday_selection_loads_group_candidates(self):
+        target = {
+            "Routine_ID": 10,
+            "Routine_Group_ID": "group-10",
+            "day_of_week": 1,
+            "start_time": "10:00:00",
+            "end_time": "11:00:00",
+            "business": "운동",
+            "location": None,
+            "who": None,
+            "start_date": None,
+            "end_date": None,
+        }
+        context = query_context.ScheduleQueryContext(
+            user_id="user-1",
+            request_time="2026-08-17 09:00:00",
+            user_text="월",
+            query_type=5,
+            pending_step="waiting_to_pick_weekday",
+            target_candidates=[1, 3],
+        )
+
+        with patch.object(
+            text_process,
+            "get_target_candidates",
+            new=AsyncMock(return_value={
+                "status": "success",
+                "candidates": [target],
+            }),
+        ):
+            result = await text_process.handle_routine_update(context)
+
+        self.assertEqual(result.pending_step, "waiting_target")
+        self.assertEqual(result.targeting_parameters, {"days_of_week": [1]})
+        self.assertEqual(result.target_candidates, [target])
+
+
+class DeleteHandlerTests(unittest.IsolatedAsyncioTestCase):
+    async def test_schedule_delete_targets_and_deletes_selected_schedule(self):
+        target = {
+            "Schedule_ID": 20,
+            "start_time": "2026-08-18 10:00:00",
+            "end_time": None,
+            "business": "회의",
+            "location": None,
+            "who": None,
+        }
+        context = query_context.ScheduleQueryContext(
+            user_id="user-1",
+            request_time="2026-08-17 09:00:00",
+            user_text="내일 회의를 삭제해줘",
+            query_type=6,
+            pending_step="waiting_to_pick_day",
+        )
+
+        with (
+            patch.object(
+                text_process,
+                "extract_dayinfo_from_text",
+                new=AsyncMock(return_value={"target_date": "2026-08-18"}),
+            ),
+            patch.object(
+                text_process,
+                "get_target_candidates",
+                new=AsyncMock(return_value={
+                    "status": "success",
+                    "candidates": [target],
+                }),
+            ),
+        ):
+            first_result = await text_process.handle_schedule_delete(context)
+
+        self.assertEqual(first_result.pending_step, "waiting_target")
+        context.user_text = "1번"
+        with patch.object(
+            text_process.db_process,
+            "process_db_query",
+            new=AsyncMock(return_value={"status": "success"}),
+        ) as process_db_mock:
+            final_result = await text_process.handle_schedule_delete(context)
+
+        self.assertEqual(final_result.pending_step, "done")
+        self.assertEqual(final_result.current_parameters, {"schedule_id": 20})
+        process_db_mock.assert_awaited_once_with(
+            "user-1",
+            6,
+            {"schedule_id": 20},
+        )
+
+    async def test_routine_delete_selects_weekday_and_deletes_group(self):
+        target = {
+            "Routine_ID": 10,
+            "Routine_Group_ID": "group-10",
+            "day_of_week": 1,
+            "start_time": "10:00:00",
+            "end_time": "11:00:00",
+            "business": "운동",
+            "location": None,
+            "who": None,
+            "start_date": None,
+            "end_date": None,
+        }
+        duplicate_group_row = {
+            **target,
+            "Routine_ID": 11,
+            "day_of_week": 3,
+        }
+        context = query_context.ScheduleQueryContext(
+            user_id="user-1",
+            request_time="2026-08-17 09:00:00",
+            user_text="루틴을 삭제해줘",
+            query_type=7,
+            pending_step="waiting_to_pick_weekday",
+        )
+
+        with (
+            patch.object(
+                text_process,
+                "extract_dayinfo_from_text",
+                new=AsyncMock(return_value={"days_of_week": None}),
+            ),
+            patch.object(
+                text_process.db_process,
+                "process_target_day_query",
+                new=AsyncMock(return_value={
+                    "status": "success",
+                    "candidates": [1, 3],
+                }),
+            ),
+        ):
+            weekday_result = await text_process.handle_routine_delete(context)
+
+        self.assertEqual(weekday_result.pending_step, "waiting_to_pick_weekday")
+        context.user_text = "월"
+        with patch.object(
+            text_process,
+            "get_target_candidates",
+            new=AsyncMock(return_value={
+                "status": "success",
+                "candidates": [target, duplicate_group_row],
+            }),
+        ):
+            target_result = await text_process.handle_routine_delete(context)
+
+        self.assertEqual(target_result.pending_step, "waiting_target")
+        self.assertEqual(target_result.target_candidates, [target])
+        context.user_text = "1번"
+        with patch.object(
+            text_process.db_process,
+            "process_db_query",
+            new=AsyncMock(return_value={"status": "success"}),
+        ) as process_db_mock:
+            final_result = await text_process.handle_routine_delete(context)
+
+        self.assertEqual(final_result.pending_step, "done")
+        self.assertEqual(
+            final_result.current_parameters,
+            {"routine_group_id": "group-10"},
+        )
+        process_db_mock.assert_awaited_once_with(
+            "user-1",
+            7,
+            {"routine_group_id": "group-10"},
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
