@@ -11,6 +11,7 @@ from service.query_context import (
     next_step_mapping,
     optional_parameters,
     parameter_templates,
+    parameter_request_mapping,
 )
 from copy import deepcopy
 

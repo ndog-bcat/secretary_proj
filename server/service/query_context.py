@@ -31,6 +31,9 @@ next_step_mapping = {
     7: "waiting_to_pick_weekday"
 }
 
+# 인자 요청시 사용할 딕셔너리
+parameter_request_mapping = {}
+
 # current_parameters 초기값 템플릿
 parameter_templates = {
     0: {"target_date": None},
