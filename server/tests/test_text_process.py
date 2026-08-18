@@ -1,6 +1,6 @@
 import unittest
 from copy import deepcopy
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, Mock, patch
 import sys
 import types
 
@@ -28,245 +28,375 @@ if "dotenv" not in sys.modules:
 from service import query_context, text_process
 
 
-class ParameterExtractionRoutingTests(unittest.IsolatedAsyncioTestCase):
-    async def test_direct_query_updates_only_current_parameters(self):
+class CurrentHandlerFlowTests(unittest.IsolatedAsyncioTestCase):
+    async def test_parameter_request_separates_required_and_optional_fields(self):
+        message = await text_process.parameter_request_message(
+            2,
+            ["business", "end_time", "location", "who"],
+        )
+
+        self.assertEqual(
+            message,
+            "추가할 일정의 내용을 알려주세요. "
+            "종료 날짜·시간, 장소, 함께하는 사람도 있다면 함께 알려주세요.",
+        )
+
+    async def test_routine_parameter_request_uses_user_facing_names(self):
+        message = await text_process.parameter_request_message(
+            3,
+            ["start_time", "business", "days_of_week", "location"],
+        )
+
+        self.assertEqual(
+            message,
+            "추가할 반복 일정의 시작 시간과 내용과 반복할 요일을 알려주세요. "
+            "장소도 있다면 함께 알려주세요.",
+        )
+
+    async def test_day_query_extracts_parameters_and_reaches_db(self):
         context = query_context.ScheduleQueryContext(
             user_id="user-1",
-            request_time="2026-08-13 09:00:00",
-            user_text="내일 오후 2시에 회의를 추가해줘",
+            request_time="2026-08-18 09:00:00",
+            user_text="show tomorrow",
+            query_type=0,
+            pending_step="waiting_parameters",
+            current_parameters=deepcopy(query_context.parameter_templates[0]),
+        )
+        process_db_mock = AsyncMock(return_value={
+            "status": "success",
+            "target_date": "2026-08-19",
+            "timeline": [],
+        })
+
+        with (
+            patch.object(
+                text_process,
+                "extract_parameters_from_text",
+                new=AsyncMock(return_value={"target_date": "2026-08-19"}),
+            ),
+            patch.object(
+                text_process.db_process,
+                "process_db_query",
+                new=process_db_mock,
+            ),
+        ):
+            result = await text_process.handle_day_query(context)
+
+        self.assertEqual(result.pending_step, "done")
+        process_db_mock.assert_awaited_once_with(
+            "user-1",
+            0,
+            {"target_date": "2026-08-19"},
+        )
+
+    async def test_range_query_applies_defaults_and_reaches_db(self):
+        context = query_context.ScheduleQueryContext(
+            user_id="user-1",
+            request_time="2026-08-18 09:00:00",
+            user_text="show my schedule",
+            query_type=1,
+            pending_step="waiting_parameters",
+            current_parameters=deepcopy(query_context.parameter_templates[1]),
+        )
+        process_db_mock = AsyncMock(return_value={
+            "status": "success",
+            "range": {
+                "start_time": "2026-08-18 09:00:00",
+                "end_time": "2026-08-19 00:00:00",
+            },
+            "timeline": [],
+        })
+
+        with (
+            patch.object(
+                text_process,
+                "extract_parameters_from_text",
+                new=AsyncMock(return_value={}),
+            ),
+            patch.object(
+                text_process.db_process,
+                "process_db_query",
+                new=process_db_mock,
+            ),
+        ):
+            result = await text_process.handle_range_query(context)
+
+        expected = {
+            "start_time": "2026-08-18 09:00:00",
+            "end_time": "2026-08-19 00:00:00",
+        }
+        self.assertEqual(result.pending_step, "done")
+        self.assertEqual(result.current_parameters, expected)
+        process_db_mock.assert_awaited_once_with("user-1", 1, expected)
+
+    async def test_schedule_insert_uses_current_extraction_contract(self):
+        context = query_context.ScheduleQueryContext(
+            user_id="user-1",
+            request_time="2026-08-18 09:00:00",
+            user_text="add a meeting tomorrow at 2pm",
             query_type=2,
+            pending_step="waiting_parameters",
             current_parameters=deepcopy(query_context.parameter_templates[2]),
         )
+        process_db_mock = AsyncMock(return_value={"status": "success"})
 
-        response = {
-            "extract_result": {
-                "start_time": "2026-08-14 14:00:00",
-                "business": "회의",
-                "unknown": "ignored",
-            }
-        }
-        with patch.object(
-            text_process,
-            "extract_parameters_from_text",
-            new=AsyncMock(return_value=response),
+        with (
+            patch.object(
+                text_process,
+                "extract_parameters_from_text",
+                new=AsyncMock(return_value={
+                    "start_time": "2026-08-19 14:00:00",
+                    "business": "meeting",
+                    "unknown": "ignored",
+                }),
+            ),
+            patch.object(
+                text_process,
+                "get_collision",
+                new=AsyncMock(return_value=[]),
+            ),
+            patch.object(
+                text_process.db_process,
+                "process_db_query",
+                new=process_db_mock,
+            ),
         ):
-            result = await text_process.update_query_context_parameters(
-                context,
-                ["start_time", "business"],
-            )
+            result = await text_process.handle_schedule_insert(context)
 
-        self.assertEqual(result, 1)
-        self.assertEqual(
-            context.current_parameters["start_time"],
-            "2026-08-14 14:00:00",
+        self.assertEqual(result.pending_step, "done")
+        self.assertEqual(result.current_parameters["business"], "meeting")
+        self.assertNotIn("unknown", result.current_parameters)
+        process_db_mock.assert_awaited_once_with(
+            "user-1",
+            2,
+            result.current_parameters,
         )
-        self.assertEqual(context.current_parameters["business"], "회의")
-        self.assertNotIn("unknown", context.current_parameters)
-        self.assertEqual(context.targeting_parameters, {})
-        self.assertEqual(context.update_parameters, {})
 
-    async def test_update_query_separates_target_and_changed_values(self):
+    async def test_routine_insert_generates_group_id_and_reaches_db(self):
         context = query_context.ScheduleQueryContext(
             user_id="user-1",
-            request_time="2026-08-13 09:00:00",
-            user_text="내일 회의를 3시로 바꾸고 장소는 지워줘",
-            query_type=4,
-            current_parameters=deepcopy(query_context.parameter_templates[4]),
-            targeting_parameters=deepcopy(
-                query_context.targeting_parameter_templates[4]
+            request_time="2026-08-18 09:00:00",
+            user_text="add a weekday exercise routine",
+            query_type=3,
+            pending_step="waiting_parameters",
+            current_parameters=deepcopy(query_context.parameter_templates[3]),
+        )
+        process_db_mock = AsyncMock(return_value={"status": "success"})
+
+        with (
+            patch.object(
+                text_process,
+                "extract_parameters_from_text",
+                new=AsyncMock(return_value={
+                    "start_time": "09:00:00",
+                    "business": "exercise",
+                    "days_of_week": [1, 2, 3, 4, 5],
+                }),
             ),
-            update_parameters=deepcopy(
-                query_context.update_parameter_templates[4]
+            patch.object(
+                text_process,
+                "get_collision",
+                new=AsyncMock(return_value=[]),
             ),
+            patch.object(
+                text_process.db_process,
+                "process_db_query",
+                new=process_db_mock,
+            ),
+        ):
+            result = await text_process.handle_routine_insert(context)
+
+        self.assertEqual(result.pending_step, "done")
+        self.assertIsNotNone(result.current_parameters["routine_group_id"])
+        process_db_mock.assert_awaited_once_with(
+            "user-1",
+            3,
+            result.current_parameters,
         )
 
-        response = {
-            "target": {
-                "target_date": "2026-08-14",
-                "business": "회의",
-                "schedule_id": 999,
-            },
-            "update_information": {
-                "start_time": "2026-08-14 15:00:00",
+    async def test_schedule_update_runs_from_initial_extraction_to_db(self):
+        target = {
+            "Schedule_ID": 10,
+            "start_time": "2026-08-19 10:00:00",
+            "end_time": None,
+            "business": "meeting",
+            "location": "office",
+            "who": None,
+        }
+        context = query_context.ScheduleQueryContext(
+            user_id="user-1",
+            request_time="2026-08-18 09:00:00",
+            user_text="move tomorrow's meeting and clear its location",
+            query_type=4,
+            pending_step="waiting_initial_extraction",
+            current_parameters=deepcopy(query_context.parameter_templates[4]),
+        )
+
+        with (
+            patch.object(
+                text_process,
+                "extract_update_parameters",
+                new=AsyncMock(return_value={
+                    "start_time": "2026-08-19 15:00:00",
+                    "location": None,
+                }),
+            ),
+            patch.object(
+                text_process,
+                "extract_dayinfo_from_text",
+                new=AsyncMock(return_value={"target_date": "2026-08-19"}),
+            ),
+            patch.object(
+                text_process,
+                "get_target_candidates",
+                new=AsyncMock(return_value={
+                    "status": "success",
+                    "candidates": [target],
+                }),
+            ),
+        ):
+            first_result = await text_process.handle_schedule_update(context)
+
+        self.assertEqual(first_result.pending_step, "waiting_target")
+        self.assertEqual(
+            first_result.targeting_parameters,
+            {"target_date": "2026-08-19"},
+        )
+        self.assertEqual(
+            first_result.update_parameters,
+            {
+                "start_time": "2026-08-19 15:00:00",
                 "location": None,
-                "schedule_id": 999,
             },
-        }
-        with patch.object(
-            text_process,
-            "extract_parameters_from_text",
-            new=AsyncMock(return_value=response),
+        )
+
+        context.user_text = "1"
+        process_db_mock = AsyncMock(return_value={"status": "success"})
+        with (
+            patch.object(
+                text_process,
+                "get_collision",
+                new=AsyncMock(return_value=[]),
+            ),
+            patch.object(
+                text_process.db_process,
+                "process_db_query",
+                new=process_db_mock,
+            ),
         ):
-            result = await text_process.update_query_context_parameters(
-                context,
-                ["target_date"],
-            )
+            final_result = await text_process.handle_schedule_update(context)
 
-        self.assertEqual(result, 1)
+        self.assertEqual(final_result.pending_step, "done")
+        self.assertEqual(final_result.current_parameters["schedule_id"], 10)
         self.assertEqual(
-            context.targeting_parameters["target_date"],
-            "2026-08-14",
+            final_result.current_parameters["start_time"],
+            "2026-08-19 15:00:00",
         )
-        self.assertNotIn("business", context.targeting_parameters)
-        self.assertNotIn("schedule_id", context.targeting_parameters)
-        self.assertEqual(
-            context.update_parameters["start_time"],
-            "2026-08-14 15:00:00",
-        )
-        self.assertIn("location", context.update_parameters)
-        self.assertIsNone(context.update_parameters["location"])
-        self.assertNotIn("schedule_id", context.update_parameters)
-        self.assertTrue(text_process.has_update_parameters(context))
-        self.assertTrue(
-            all(value is None for value in context.current_parameters.values())
+        self.assertIsNone(final_result.current_parameters["location"])
+        process_db_mock.assert_awaited_once_with(
+            "user-1",
+            4,
+            final_result.current_parameters,
         )
 
-    async def test_delete_query_updates_only_targeting_parameters(self):
+    async def test_extraction_failure_reasks_without_calling_db(self):
         context = query_context.ScheduleQueryContext(
             user_id="user-1",
-            request_time="2026-08-13 09:00:00",
-            user_text="월수금 운동 루틴을 삭제해줘",
-            query_type=7,
-            current_parameters=deepcopy(query_context.parameter_templates[7]),
-            targeting_parameters=deepcopy(
-                query_context.targeting_parameter_templates[7]
-            ),
+            request_time="2026-08-18 09:00:00",
+            user_text="unparseable request",
+            query_type=2,
+            pending_step="waiting_parameters",
+            current_parameters=deepcopy(query_context.parameter_templates[2]),
         )
+        process_db_mock = AsyncMock()
 
-        response = {
-            "target": {
-                "days_of_week": [1, 3, 5],
-                "business": "운동",
-            }
-        }
-        with patch.object(
-            text_process,
-            "extract_parameters_from_text",
-            new=AsyncMock(return_value=response),
+        with (
+            patch.object(
+                text_process,
+                "extract_parameters_from_text",
+                new=AsyncMock(return_value={"result": "extract fail"}),
+            ),
+            patch.object(
+                text_process.db_process,
+                "process_db_query",
+                new=process_db_mock,
+            ),
         ):
-            result = await text_process.update_query_context_parameters(
-                context,
-                ["days_of_week"],
-            )
+            result = await text_process.handle_schedule_insert(context)
 
-        self.assertEqual(result, 1)
-        self.assertEqual(context.targeting_parameters["days_of_week"], [1, 3, 5])
-        self.assertNotIn("business", context.targeting_parameters)
-        self.assertEqual(context.update_parameters, {})
-        self.assertFalse(text_process.has_update_parameters(context))
-        self.assertIsNone(context.current_parameters["routine_group_id"])
+        self.assertEqual(result.pending_step, "waiting_parameters")
+        process_db_mock.assert_not_awaited()
 
-    async def test_update_values_accumulate_across_user_responses(self):
-        context = query_context.ScheduleQueryContext(
-            user_id="user-1",
-            request_time="2026-08-13 09:00:00",
-            user_text="내일 일정을 3시로 바꿔줘",
-            query_type=4,
-            current_parameters=deepcopy(query_context.parameter_templates[4]),
-            targeting_parameters=deepcopy(
-                query_context.targeting_parameter_templates[4]
-            ),
-            update_parameters=deepcopy(
-                query_context.update_parameter_templates[4]
-            ),
+
+class CurrentOllamaContractTests(unittest.IsolatedAsyncioTestCase):
+    @staticmethod
+    def async_client_for(response_text):
+        response = Mock(status_code=200)
+        response.json.return_value = {"response": response_text}
+        client = AsyncMock()
+        client.post.return_value = response
+        context_manager = MagicMock()
+        context_manager.__aenter__ = AsyncMock(return_value=client)
+        context_manager.__aexit__ = AsyncMock(return_value=None)
+        return context_manager, client
+
+    async def test_parameter_extractor_returns_inner_result_dict(self):
+        context_manager, client = self.async_client_for(
+            '{"extract_result":{"target_date":"2026-08-19"}}'
         )
-        responses = [
-            {
-                "target": {"target_date": "2026-08-14"},
-                "update_information": {
-                    "start_time": "2026-08-14 15:00:00"
-                },
-            },
-            {
-                "target": {"target_date": None},
-                "update_information": {"location": "홍대"},
-            },
-        ]
 
         with patch.object(
-            text_process,
-            "extract_parameters_from_text",
-            new=AsyncMock(side_effect=responses),
+            text_process.httpx,
+            "AsyncClient",
+            return_value=context_manager,
         ):
-            await text_process.update_query_context_parameters(
-                context,
-                ["target_date"],
-            )
-            context.user_text = "두 번째 일정이고 장소는 홍대로 바꿔줘"
-            await text_process.update_query_context_parameters(context, [])
-
-        self.assertEqual(
-            context.update_parameters,
-            {
-                "start_time": "2026-08-14 15:00:00",
-                "location": "홍대",
-            },
-        )
-        self.assertEqual(
-            context.targeting_parameters,
-            {"target_date": "2026-08-14"},
-        )
-
-
-class PromptContractTests(unittest.TestCase):
-    def test_classification_prompt_contains_small_model_decision_rules(self):
-        prompt = text_process.build_query_type_prompt(
-            "매주 월요일 운동 루틴을 없애줘"
-        )
-
-        self.assertIn("반복 루틴 삭제", prompt)
-        self.assertIn("단순히 날짜가 월요일이라는 이유만으로", prompt)
-        self.assertIn('{"query_type":7}', prompt)
-        self.assertTrue(prompt.endswith("JSON 출력:"))
-
-    def test_schedule_update_prompt_contains_context_and_separation_rules(self):
-        prompt = text_process.build_parameter_extraction_prompt(
-            query_type=4,
-            user_text="3시로 바꾸고 장소는 지워줘",
-            required_args=[],
-            request_time="2026-08-13 09:00:00",
-            context_snapshot={
-                "selected_target": {
-                    "schedule_id": 10,
-                    "start_time": "2026-08-14 14:00:00",
-                }
-            },
-        )
-
-        self.assertIn('"schedule_id": 10', prompt)
-        self.assertIn("target.target_date만 사용", prompt)
-        self.assertIn("명시적 변경", prompt)
-        self.assertIn("해당 키를 null", prompt)
-
-    def test_routine_update_prompt_separates_old_and_new_weekdays(self):
-        prompt = text_process.build_parameter_extraction_prompt(
-            query_type=5,
-            user_text="월수금 루틴을 화목으로 바꿔줘",
-            required_args=["days_of_week"],
-            request_time="2026-08-13 09:00:00",
-        )
-
-        self.assertIn("target.days_of_week=[1,3,5]", prompt)
-        self.assertIn("update_information.days_of_week=[2,4]", prompt)
-
-    def test_json_parser_accepts_fenced_or_prefixed_object(self):
-        self.assertEqual(
-            text_process.parse_json_object('```json\n{"query_type": 4}\n```'),
-            {"query_type": 4},
-        )
-        self.assertEqual(
-            text_process.parse_json_object('결과: {"query_type": 5}'),
-            {"query_type": 5},
-        )
-
-    def test_normalizer_accepts_direct_fields_without_envelope(self):
-        self.assertEqual(
-            text_process.normalize_extraction_result(
+            result = await text_process.extract_parameters_from_text(
                 0,
-                {"target_date": "2026-08-14"},
-            ),
-            {"extract_result": {"target_date": "2026-08-14"}},
-        )
+                "show tomorrow",
+                ["target_date"],
+                "2026-08-18 09:00:00",
+                {"target_date": None},
+            )
+
+        self.assertEqual(result, {"target_date": "2026-08-19"})
+        payload = client.post.await_args.kwargs["json"]
+        self.assertEqual(payload["format"], "json")
+        self.assertFalse(payload["stream"])
+
+    async def test_query_type_identifier_uses_current_json_contract(self):
+        context_manager, client = self.async_client_for('{"query_type":7}')
+
+        with patch.object(
+            text_process.httpx,
+            "AsyncClient",
+            return_value=context_manager,
+        ):
+            result = await text_process.identify_query_type(
+                "delete a recurring routine"
+            )
+
+        self.assertEqual(result, 7)
+        payload = client.post.await_args.kwargs["json"]
+        self.assertEqual(payload["format"], "json")
+        self.assertFalse(payload["stream"])
+
+    async def test_parameter_extractor_converts_invalid_json_to_failure(self):
+        context_manager, _client = self.async_client_for("not-json")
+
+        with patch.object(
+            text_process.httpx,
+            "AsyncClient",
+            return_value=context_manager,
+        ):
+            result = await text_process.extract_parameters_from_text(
+                0,
+                "show tomorrow",
+                ["target_date"],
+                "2026-08-18 09:00:00",
+                {"target_date": None},
+            )
+
+        self.assertEqual(result, {"result": "extract fail"})
 
 
 class ScheduleUpdateAssemblyTests(unittest.IsolatedAsyncioTestCase):

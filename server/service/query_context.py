@@ -32,7 +32,55 @@ next_step_mapping = {
 }
 
 # 인자 요청시 사용할 딕셔너리
-parameter_request_mapping = {}
+parameter_request_mapping = {
+    0: {
+        "target_date": ["조회할 날짜", "와 ", "를 "],
+        "format_front": "",
+        "format_back": "알려주세요."
+        },
+    2: {
+        "start_time": ["시작 날짜·시간", "과 ", "을 "],
+        "end_time": ["종료 날짜·시간", "과 ", "을 "],
+        "business": ["내용", "과 ", "을 "],
+        "location": ["장소", "와 ", "를 "],
+        "who": ["함께하는 사람", "과 ", "을 "],
+        "format_front": "추가할 일정의",
+        "format_back": "알려주세요."
+        },
+    3: {
+        "start_time": ["시작 시간", "과 ", "을 "],
+        "end_time": ["종료 시간", "과 ", "을 "],
+        "business": ["내용", "과 ", "을 "],
+        "location": ["장소", "와 ", "를 "],
+        "who": ["함께하는 사람", "과 ", "을 "],
+        "days_of_week": ["반복할 요일", "과 ", "을 "],
+        "start_date": ["유효기간 시작 날짜", "와 ", "를 "],
+        "end_date": ["유효기간 종료 날짜", "와 ", "를 "],
+        "format_front": "추가할 반복 일정의",
+        "format_back": "알려주세요."
+        },
+    4: {
+        "start_time": ["시작 날짜·시간", "과 ", "이 "],
+        "end_time": ["종료 날짜·시간", "과 ", "이 "],
+        "business": ["내용", "과 ", "이 "],
+        "location": ["장소", "와 ", "가 "],
+        "who": ["함께하는 사람", "과 ", "이 "],
+        "format_front": "일정에서 수정할",
+        "format_back": "있다면 새로 설정할 값을 알려주세요."
+        },
+    5: {
+        "start_time": ["시작 시간", "과 ", "이 "],
+        "end_time": ["종료 시간", "과 ", "이 "],
+        "business": ["내용", "과 ", "이 "],
+        "location": ["장소", "와 ", "가 "],
+        "who": ["함께하는 사람", "과 ", "이 "],
+        "days_of_week": ["반복할 요일", "과 ", "이 "],
+        "start_date": ["유효기간 시작 날짜", "와 ", "가 "],
+        "end_date": ["유효기간 종료 날짜", "와 ", "가 "],
+        "format_front": "반복 일정에서 수정할",
+        "format_back": "있다면 새로 설정할 값을 알려주세요."
+        }
+}
 
 # current_parameters 초기값 템플릿
 parameter_templates = {

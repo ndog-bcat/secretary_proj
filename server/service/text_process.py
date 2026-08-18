@@ -139,18 +139,36 @@ def check_arg(query_type: int, curr_arg: dict) -> list[str]:
     return missing_args
 
 async def parameter_request_message(query_type: int, required_args: list[str]) -> str:
-    if (query_type == 0):
-        return f"{', '.join(required_args)}이(가) 누락되었습니다. 특정 날짜를 알려주세요."
-    elif (query_type == 1):
-        return f"{', '.join(required_args)}이(가) 누락되었습니다. 시작 날짜와 종료 날짜를 알려주세요."
-    elif (query_type == 2):
-        return f"{', '.join(required_args)}이(가) 누락되었습니다. 일정 삽입에 필요한 정보를 알려주세요."
-    elif (query_type == 3):
-        return f"{', '.join(required_args)}이(가) 누락되었습니다. 루틴 삽입에 필요한 정보를 알려주세요."
-    elif (query_type == 4):
-        return f"{', '.join(required_args)}이(가) 누락되었습니다. 일정 수정에 필요한 정보를 알려주세요."    
-    elif (query_type == 5):
-        return f"{', '.join(required_args)}이(가) 누락되었습니다. 루틴 수정에 필요한 정보를 알려주세요."
+    required_parameters = [parameter for parameter in required_args if parameter in mandatory_parameters[query_type]]
+    optional_parameters_to_request = [parameter for parameter in required_args if parameter in optional_parameters[query_type]]
+
+    last = len(required_parameters)
+    message = ""
+    for i in range(last-1):
+        parameter = required_parameters[i]
+        message += (
+            parameter_request_mapping[query_type][parameter][0]
+            + parameter_request_mapping[query_type][parameter][1]
+        )
+    last_parameter = required_parameters[last-1]
+    message += (
+        parameter_request_mapping[query_type][last_parameter][0]
+        + parameter_request_mapping[query_type][last_parameter][2]
+    )
+    message = (
+        parameter_request_mapping[query_type]["format_front"]
+        + " "
+        + message
+        + parameter_request_mapping[query_type]["format_back"]
+    ).strip()
+
+    if optional_parameters_to_request:
+        optional_names = ", ".join(
+            parameter_request_mapping[query_type][parameter][0]
+            for parameter in optional_parameters_to_request
+        )
+        message += f" {optional_names}도 있다면 함께 알려주세요."
+    return message
 
 async def extract_parameters_from_text(query_type: int, user_text: str, required_args: list[str], request_time: str, current_parameters: dict) -> dict:
     prompt = (f"""
