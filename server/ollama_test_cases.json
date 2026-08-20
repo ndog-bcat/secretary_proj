@@ -1,0 +1,182 @@
+[
+  {
+    "name": "분류 0 - 하루 조회",
+    "function": "identify_query_type",
+    "query_type": null,
+    "request_time": "2026-08-20 12:00:00",
+    "input": "오늘 나 뭐해?",
+    "expected": 0
+  },
+  {
+    "name": "분류 1 - 기간 조회",
+    "function": "identify_query_type",
+    "query_type": null,
+    "request_time": "2026-08-20 12:00:00",
+    "input": "이번 주 일정 뭐 있어?",
+    "expected": 1
+  },
+  {
+    "name": "분류 2 - 일정 추가",
+    "function": "identify_query_type",
+    "query_type": null,
+    "request_time": "2026-08-20 12:00:00",
+    "input": "내일 오후 3시에 회의 추가해줘",
+    "expected": 2
+  },
+  {
+    "name": "분류 3 - 루틴 추가",
+    "function": "identify_query_type",
+    "query_type": null,
+    "request_time": "2026-08-20 12:00:00",
+    "input": "매주 화요일과 목요일 오후 6시에 운동 추가해줘",
+    "expected": 3
+  },
+  {
+    "name": "분류 4 - 일정 수정",
+    "function": "identify_query_type",
+    "query_type": null,
+    "request_time": "2026-08-20 12:00:00",
+    "input": "내일 회의 시간을 오후 4시로 바꿔줘",
+    "expected": 4
+  },
+  {
+    "name": "분류 5 - 루틴 수정",
+    "function": "identify_query_type",
+    "query_type": null,
+    "request_time": "2026-08-20 12:00:00",
+    "input": "매주 화목 운동 루틴을 월수금으로 바꿔줘",
+    "expected": 5
+  },
+  {
+    "name": "분류 6 - 일정 삭제",
+    "function": "identify_query_type",
+    "query_type": null,
+    "request_time": "2026-08-20 12:00:00",
+    "input": "내일 회의 취소해줘",
+    "expected": 6
+  },
+  {
+    "name": "분류 7 - 루틴 삭제",
+    "function": "identify_query_type",
+    "query_type": null,
+    "request_time": "2026-08-20 12:00:00",
+    "input": "매주 월요일 운동 루틴 삭제해줘",
+    "expected": 7
+  },
+  {
+    "name": "추출 0 - 상대 날짜",
+    "function": "extract_parameters_from_text",
+    "query_type": 0,
+    "request_time": "2026-08-20 12:00:00",
+    "input": "내일 일정 알려줘",
+    "expected": {
+      "target_date": "2026-08-21"
+    }
+  },
+  {
+    "name": "추출 1 - 이번 주",
+    "function": "extract_parameters_from_text",
+    "query_type": 1,
+    "request_time": "2026-08-20 12:00:00",
+    "input": "이번 주 일정 알려줘",
+    "expected": {
+      "start_time": "2026-08-17 00:00:00",
+      "end_time": "2026-08-24 00:00:00"
+    }
+  },
+  {
+    "name": "추출 2 - 일정 추가 인자",
+    "function": "extract_parameters_from_text",
+    "query_type": 2,
+    "request_time": "2026-08-20 12:00:00",
+    "input": "내일 오후 3시부터 4시까지 강의실에서 김철수와 회의 추가해줘",
+    "expected": {
+      "start_time": "2026-08-21 15:00:00",
+      "end_time": "2026-08-21 16:00:00",
+      "business": "회의",
+      "location": "강의실",
+      "who": ["김철수"]
+    }
+  },
+  {
+    "name": "추출 3 - 루틴 추가 인자",
+    "function": "extract_parameters_from_text",
+    "query_type": 3,
+    "request_time": "2026-08-20 12:00:00",
+    "input": "매주 화요일과 목요일 오후 6시부터 7시 15분까지 기초 인공지능 수업 추가해줘",
+    "expected": {
+      "start_time": "18:00:00",
+      "end_time": "19:15:00",
+      "business": "기초 인공지능 수업",
+      "location": null,
+      "who": null,
+      "days_of_week": [2, 4],
+      "start_date": null,
+      "end_date": null
+    }
+  },
+  {
+    "name": "타겟팅 4 - 일정 날짜",
+    "function": "extract_dayinfo_from_text",
+    "query_type": 4,
+    "request_time": "2026-08-20 12:00:00",
+    "input": "내일 회의 시간을 바꿔줘",
+    "expected": {
+      "target_date": "2026-08-21"
+    }
+  },
+  {
+    "name": "타겟팅 5 - 루틴 요일",
+    "function": "extract_dayinfo_from_text",
+    "query_type": 5,
+    "request_time": "2026-08-20 12:00:00",
+    "input": "화요일 운동 루틴을 수정할래",
+    "expected": {
+      "days_of_week": [2]
+    }
+  },
+  {
+    "name": "수정 추출 4 - 일정 시작 시각",
+    "function": "extract_update_parameters",
+    "query_type": 4,
+    "request_time": "2026-08-20 12:00:00",
+    "input": "시작 시간을 내일 오후 4시로 바꿔줘",
+    "expected": {
+      "start_time": "2026-08-21 16:00:00"
+    }
+  },
+  {
+    "name": "수정 추출 5 - 루틴 요일",
+    "function": "extract_update_parameters",
+    "query_type": 5,
+    "request_time": "2026-08-20 12:00:00",
+    "input": "반복 요일을 화요일과 목요일로 바꿔줘",
+    "expected": {
+      "days_of_week": [2, 4]
+    }
+  },
+  {"name": "직접 작성 17", "function": "", "query_type": null, "request_time": "2026-08-20 12:00:00", "input": "", "expected": null},
+  {"name": "직접 작성 18", "function": "", "query_type": null, "request_time": "2026-08-20 12:00:00", "input": "", "expected": null},
+  {"name": "직접 작성 19", "function": "", "query_type": null, "request_time": "2026-08-20 12:00:00", "input": "", "expected": null},
+  {"name": "직접 작성 20", "function": "", "query_type": null, "request_time": "2026-08-20 12:00:00", "input": "", "expected": null},
+  {"name": "직접 작성 21", "function": "", "query_type": null, "request_time": "2026-08-20 12:00:00", "input": "", "expected": null},
+  {"name": "직접 작성 22", "function": "", "query_type": null, "request_time": "2026-08-20 12:00:00", "input": "", "expected": null},
+  {"name": "직접 작성 23", "function": "", "query_type": null, "request_time": "2026-08-20 12:00:00", "input": "", "expected": null},
+  {"name": "직접 작성 24", "function": "", "query_type": null, "request_time": "2026-08-20 12:00:00", "input": "", "expected": null},
+  {"name": "직접 작성 25", "function": "", "query_type": null, "request_time": "2026-08-20 12:00:00", "input": "", "expected": null},
+  {"name": "직접 작성 26", "function": "", "query_type": null, "request_time": "2026-08-20 12:00:00", "input": "", "expected": null},
+  {"name": "직접 작성 27", "function": "", "query_type": null, "request_time": "2026-08-20 12:00:00", "input": "", "expected": null},
+  {"name": "직접 작성 28", "function": "", "query_type": null, "request_time": "2026-08-20 12:00:00", "input": "", "expected": null},
+  {"name": "직접 작성 29", "function": "", "query_type": null, "request_time": "2026-08-20 12:00:00", "input": "", "expected": null},
+  {"name": "직접 작성 30", "function": "", "query_type": null, "request_time": "2026-08-20 12:00:00", "input": "", "expected": null},
+  {"name": "직접 작성 31", "function": "", "query_type": null, "request_time": "2026-08-20 12:00:00", "input": "", "expected": null},
+  {"name": "직접 작성 32", "function": "", "query_type": null, "request_time": "2026-08-20 12:00:00", "input": "", "expected": null},
+  {"name": "직접 작성 33", "function": "", "query_type": null, "request_time": "2026-08-20 12:00:00", "input": "", "expected": null},
+  {"name": "직접 작성 34", "function": "", "query_type": null, "request_time": "2026-08-20 12:00:00", "input": "", "expected": null},
+  {"name": "직접 작성 35", "function": "", "query_type": null, "request_time": "2026-08-20 12:00:00", "input": "", "expected": null},
+  {"name": "직접 작성 36", "function": "", "query_type": null, "request_time": "2026-08-20 12:00:00", "input": "", "expected": null},
+  {"name": "직접 작성 37", "function": "", "query_type": null, "request_time": "2026-08-20 12:00:00", "input": "", "expected": null},
+  {"name": "직접 작성 38", "function": "", "query_type": null, "request_time": "2026-08-20 12:00:00", "input": "", "expected": null},
+  {"name": "직접 작성 39", "function": "", "query_type": null, "request_time": "2026-08-20 12:00:00", "input": "", "expected": null},
+  {"name": "직접 작성 40", "function": "", "query_type": null, "request_time": "2026-08-20 12:00:00", "input": "", "expected": null}
+]

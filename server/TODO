@@ -35,6 +35,8 @@ PARAMETER_REQUEST_NAMES = {
 
 대표 문장 20~30개가 정상 처리되면 다음 단계로 이동한다. 프롬프트를 필요 이상으로 계속 다듬지 않는다.
 
+- 프롬프트 필요함수: identify_query_type, extract_parameters_from_text, extract_dayinfo_from_text, extract_update_parameters
+
 ## 3. `server.py` 연결
 
 - [ ] 텍스트 요청 Pydantic 구조체 작성
