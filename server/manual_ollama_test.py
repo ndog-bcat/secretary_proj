@@ -39,7 +39,7 @@ def format_spec(spec: dict, allow_partial: bool = False) -> str:
 
     result = json.dumps(fields, ensure_ascii=False, indent=2)
     if allow_partial:
-        result += "\n※ 말하지 않은 수정 필드는 키 자체가 없어도 됩니다."
+        result += "\n※ 사용자가 말하지 않은 필드는 키 자체가 없어도 됩니다."
     return result
 
 
@@ -131,7 +131,13 @@ def print_result(expected: str, actual, errors: list[str]) -> None:
     print()
 
 
-async def execute_test(function_name: str, query_type: int | None, user_text: str, request_time: str):
+async def execute_test(
+    function_name: str,
+    query_type: int | None,
+    user_text: str,
+    request_time: str,
+    target_date: str | None = None,
+):
     if function_name == "identify_query_type":
         actual = await identify_query_type(user_text)
         errors = [] if isinstance(actual, int) and actual in range(8) else ["0부터 7까지의 정수가 아닙니다."]
@@ -147,12 +153,12 @@ async def execute_test(function_name: str, query_type: int | None, user_text: st
             request_time,
             {key: None for key in required_args},
         )
-        return actual, validate_result(actual, spec)
+        return actual, validate_result(actual, spec, allow_partial=True)
 
     if function_name == "extract_dayinfo_from_text":
         spec = TARGETING_PARAMETER_SPECS[query_type]
         actual = await extract_dayinfo_from_text(query_type, user_text, request_time)
-        return actual, validate_result(actual, spec)
+        return actual, validate_result(actual, spec, allow_partial=True)
 
     if function_name == "extract_update_parameters":
         spec = UPDATE_PARAMETER_SPECS[query_type]
@@ -161,6 +167,7 @@ async def execute_test(function_name: str, query_type: int | None, user_text: st
             user_text,
             list(spec),
             request_time,
+            target_date,
         )
         return actual, validate_result(actual, spec, allow_partial=True)
 
@@ -191,6 +198,7 @@ async def run_batch_tests() -> None:
                 case.get("query_type"),
                 case["input"],
                 case.get("request_time") or "2026-08-20 12:00:00",
+                case.get("target_date"),
             )
         except (KeyError, TypeError, ValueError) as error:
             actual = None
@@ -232,14 +240,14 @@ async def run_selected(function_number: str, request_time: str) -> None:
         if query_type is None:
             return
         spec = DIRECT_PARAMETER_SPECS[query_type]
-        expected = format_spec(spec)
+        expected = format_spec(spec, allow_partial=True)
         print("\nextract_parameters_from_text 함수입니다. 조회 또는 삽입 요청을 입력해주세요.")
     elif function_number == "3":
         query_type = read_query_type(set(TARGETING_PARAMETER_SPECS))
         if query_type is None:
             return
         spec = TARGETING_PARAMETER_SPECS[query_type]
-        expected = format_spec(spec)
+        expected = format_spec(spec, allow_partial=True)
         print("\nextract_dayinfo_from_text 함수입니다. 수정/삭제할 일정의 날짜 또는 루틴의 요일이 담긴 요청을 입력해주세요.")
     else:
         query_type = read_query_type(set(UPDATE_PARAMETER_SPECS))
@@ -274,10 +282,10 @@ async def run_selected(function_number: str, request_time: str) -> None:
                 request_time,
                 current_parameters,
             )
-            errors = validate_result(actual, spec)
+            errors = validate_result(actual, spec, allow_partial=True)
         elif function_number == "3":
             actual = await extract_dayinfo_from_text(query_type, user_text, request_time)
-            errors = validate_result(actual, spec)
+            errors = validate_result(actual, spec, allow_partial=True)
         else:
             required_args = list(spec)
             actual = await extract_update_parameters(

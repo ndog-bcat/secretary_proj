@@ -10,6 +10,7 @@ from service.query_context import (
     mandatory_parameters,
     next_step_mapping,
     optional_parameters,
+    parameter_extraction_mapping,
     parameter_templates,
     parameter_request_mapping,
 )
@@ -22,7 +23,7 @@ async def process_text_query(query_context: query_context.ScheduleQueryContext) 
         query_type = await identify_query_type(query_context.user_text)
         if query_type not in range(8):
             query_context.pending_step = "failed"
-            query_context.response_message = "❌ 쿼리 유형을 파악할 수 없습니다. 다시 시도해주세요."
+            query_context.response_message = "쿼리 유형을 파악할 수 없습니다. 다시 시도해주세요."
             return query_context
         query_context.query_type = query_type # query_context에 query_type 저장
         query_context.current_parameters = deepcopy(parameter_templates.get(query_type)) # query_context에 current_parameters 초기화
@@ -74,7 +75,8 @@ async def identify_query_type(user_text: str) -> int:
         "model": "qwen2.5-coder:7b",
         "prompt": prompt,
         "stream": False,
-        "format": "json"
+        "format": "json",
+        "options": {"temperature": 0}
     }
 
     try:
@@ -170,53 +172,131 @@ async def parameter_request_message(query_type: int, required_args: list[str]) -
         message += f" {optional_names}도 있다면 함께 알려주세요."
     return message
 
+def build_time_reference(request_time: str) -> str:
+    reference_time = datetime.strptime(request_time, "%Y-%m-%d %H:%M:%S")
+    today = reference_time.date()
+    weekday_names = ["월요일", "화요일", "수요일", "목요일", "금요일", "토요일", "일요일"]
+    this_monday = today - timedelta(days=today.weekday())
+    next_monday = this_monday + timedelta(days=7)
+    following_monday = next_monday + timedelta(days=7)
+    next_week = "\n".join(
+        f"- {weekday_name}: {(next_monday + timedelta(days=day_offset)).isoformat()}"
+        for day_offset, weekday_name in enumerate(weekday_names)
+    )
+
+    return (
+        f"기준 시각: {request_time}\n"
+        f"기준 연도: {today.year}\n"
+        f"기준 월: {today.month}\n"
+        f"연도 생략 예시: '9월 1일'은 {today.year}-09-01\n"
+        f"'내년'이라고 명시한 경우에만 {today.year + 1}년을 사용\n"
+        f"오늘({weekday_names[today.weekday()]}): {today.isoformat()}\n"
+        f"내일: {(today + timedelta(days=1)).isoformat()}\n"
+        f"모레/내일모레: {(today + timedelta(days=2)).isoformat()}\n"
+        f"이번 주 기간: {this_monday.isoformat()} 00:00:00 ~ {next_monday.isoformat()} 00:00:00\n"
+        f"다음 주 기간: {next_monday.isoformat()} 00:00:00 ~ {following_monday.isoformat()} 00:00:00\n"
+        f"다음 주 요일별 날짜:\n{next_week}"
+    )
+
+WEEKDAY_NAME_TO_NUMBER = {
+    "일": 0,
+    "일요일": 0,
+    "월": 1,
+    "월요일": 1,
+    "화": 2,
+    "화요일": 2,
+    "수": 3,
+    "수요일": 3,
+    "목": 4,
+    "목요일": 4,
+    "금": 5,
+    "금요일": 5,
+    "토": 6,
+    "토요일": 6,
+}
+
+WEEKDAY_GROUPS = {
+    "매일": [0, 1, 2, 3, 4, 5, 6],
+    "평일": [1, 2, 3, 4, 5],
+    "주말": [0, 6],
+}
+
+def normalize_days_of_week(extract_result: dict) -> dict:
+    if "days_of_week" not in extract_result:
+        return extract_result
+
+    value = extract_result["days_of_week"]
+    if value is None:
+        return extract_result
+
+    if isinstance(value, str):
+        try:
+            parsed_value = json.loads(value)
+            if parsed_value is None:
+                return extract_result
+            value = parsed_value
+        except json.JSONDecodeError:
+            value = [value]
+
+    if not isinstance(value, list):
+        return {"result": "extract fail"}
+
+    weekday_numbers = []
+    for weekday_name in value:
+        if not isinstance(weekday_name, str):
+            return {"result": "extract fail"}
+        normalized_name = weekday_name.strip()
+        if normalized_name in WEEKDAY_GROUPS:
+            weekday_numbers.extend(WEEKDAY_GROUPS[normalized_name])
+        elif normalized_name in WEEKDAY_NAME_TO_NUMBER:
+            weekday_numbers.append(WEEKDAY_NAME_TO_NUMBER[normalized_name])
+        else:
+            return {"result": "extract fail"}
+
+    extract_result["days_of_week"] = sorted(set(weekday_numbers))
+    return extract_result
+
 async def extract_parameters_from_text(query_type: int, user_text: str, required_args: list[str], request_time: str, current_parameters: dict) -> dict:
+    extraction_mapping = parameter_extraction_mapping.get(query_type, {})
+    fields_to_extract = [field for field in required_args if field in extraction_mapping]
+    field_formats = "\n".join(
+        extraction_mapping[field][0]
+        for field in fields_to_extract
+    )
+    field_rules = "\n".join(dict.fromkeys(
+        rule
+        for field in fields_to_extract
+        for rule in extraction_mapping[field][1]
+    ))
+    collected_parameters = {
+        key: value
+        for key, value in current_parameters.items()
+        if key in extraction_mapping and value is not None
+    }
+    time_reference = build_time_reference(request_time)
     prompt = (f"""
         역할: 사용자의 일정 요청에서 현재 단계에 필요한 필드만 추출한다.
 
         쿼리 유형: {query_type}
-        기준 시각: {request_time}
-        현재 단계에서 추출할 필드: {required_args}
-        이미 수집한 값: {current_parameters}
-
-        쿼리 유형:
-        0 = 하루 조회
-        1 = 기간 조회
-        2 = 일정 삽입
-        3 = 루틴 삽입
-        4 = 일정 수정
-        5 = 루틴 수정
-        6 = 일정 삭제
-        7 = 루틴 삭제
+        기준 시각 정보:
+        {time_reference}
+        반환이 허용된 후보 필드(모두 반환할 필요 없음): {fields_to_extract}
+        이미 수집한 값: {collected_parameters}
 
         필드 형식:
-        - target_date: YYYY-MM-DD
-        - 일정의 start_time, end_time: YYYY-MM-DD HH:MM:SS
-        - 루틴의 start_time, end_time: HH:MM:SS
-        - business: 일정 또는 루틴의 핵심 내용 문자열
-        - location: 장소 문자열
-        - who: 사람 이름 문자열 배열
-        - days_of_week: 0~6을 원소로 가지는 배열. 0=일, 1=월, 2=화, 3=수, 4=목, 5=금, 6=토
-        - start_date, end_date: YYYY-MM-DD
+        {field_formats}
 
         규칙:
-        - 반드시 "현재 단계에서 추출할 필드"에 있는 키만 처리한다.
-        - 타겟팅 단계에서 target_date만 주어지면 기존 일정의 날짜만 추출한다.
-        - 타겟팅 단계에서 days_of_week만 주어지면 기존 루틴의 요일만 추출한다.
-        - 수정 단계에서는 전달된 수정 필드에 대해 사용자가 새로 바꾸려는 값만 추출한다.
-        - 기존 대상을 설명하는 값과 새로 변경할 값을 혼동하지 않는다.
-        - schedule_id와 routine_group_id는 사용자 문장으로 추측하거나 생성하지 않는다.
-        - 오늘, 내일, 모레 같은 상대 날짜는 기준 시각으로 계산한다.
-        - 오전과 오후를 구분하여 24시간제로 변환한다.
-        - 매일은 [0,1,2,3,4,5,6], 평일은 [1,2,3,4,5], 주말은 [0,6]이다.
-        - 기간 조회의 end_time은 조회에 포함되지 않는 종료 경계다.
-        - “이번 주”는 이번 주 월요일 00:00:00부터 다음 주 월요일 00:00:00까지다.
-        - 사용자가 말하지 않은 값은 추측하지 말고 null로 반환한다.
-        - 장소, 동반자, 종료 시각을 지우라는 요청은 해당 필드 값을 null로 반환한다.
+        {field_rules}
+        - 후보 필드는 반환 가능한 키 목록이며 모두 채워야 하는 필드 목록이 아니다.
+        - 반드시 "반환이 허용된 후보 필드"에 있는 키만 반환한다.
+        - 사용자가 말하지 않은 필드는 반환하지 않는다.
+        - null을 문자열 "null"로 반환하지 않는다.
         - 설명이나 마크다운을 붙이지 않는다.
 
-        다음 형식의 JSON만 반환한다:
-        {{"extract_result": {{"필드명": "추출값 또는 null"}}}}
+        extract_result 객체 안에 필드 형식에 맞는 JSON 값만 넣어 반환한다.
+        문자열은 JSON 문자열, 배열은 JSON 배열로 반환한다.
+        추출할 값이 없다면 {{"extract_result": {{}}}}를 반환한다.
 
         사용자 요청: {user_text}
         """
@@ -226,7 +306,8 @@ async def extract_parameters_from_text(query_type: int, user_text: str, required
         "model": "qwen2.5-coder:7b",
         "prompt": prompt,
         "stream": False,
-        "format": "json"
+        "format": "json",
+        "options": {"temperature": 0}
     }
 
     try:
@@ -234,8 +315,19 @@ async def extract_parameters_from_text(query_type: int, user_text: str, required
             response = await client.post(OLLAMA_URL, json=payload, timeout=30.0)
             if response.status_code == 200:
                 result_str = response.json().get("response", "{}")
-                extract_result = dict(json.loads(result_str).get("extract_result"))
-                return extract_result
+                extract_result = dict(
+                    json.loads(result_str).get("extract_result") or {}
+                )
+                extract_result = {
+                    key: value
+                    for key, value in extract_result.items()
+                    if value is not None
+                    and not (
+                        isinstance(value, str)
+                        and value.strip().lower() == "null"
+                    )
+                }
+                return normalize_days_of_week(extract_result)
             print(f"Ollama 에러: {response.status_code}")
             return {"result": "extract fail"}
     except Exception as e:
@@ -396,10 +488,12 @@ async def collision_decision_request(query_type: int, collision_list: list[dict]
     )
 
 async def extract_dayinfo_from_text(query_type: int, user_text: str, request_time: str) -> dict:
+    time_reference = build_time_reference(request_time)
     schedule_prompt = (f"""
         역할: 사용자의 일정 수정/삭제 요청에서 해당 일정이 어느 날짜에 속하는지 추출한다.
 
-        기준 시각: {request_time}
+        기준 시각 정보:
+        {time_reference}
         현재 단계에서 추출할 필드: target_date
 
         필드 형식:
@@ -407,14 +501,14 @@ async def extract_dayinfo_from_text(query_type: int, user_text: str, request_tim
 
         규칙:
         - 반드시 "현재 단계에서 추출할 필드"에 있는 키만 처리한다.
-        - 오늘, 내일, 모레 같은 상대 날짜는 기준 시각으로 계산한다.
-        - 오전과 오후를 구분하여 24시간제로 변환한다.
-        - “이번 주”는 이번 주 월요일 00:00:00부터 다음 주 월요일 00:00:00까지다.
-        - 사용자가 말하지 않은 값은 추측하지 말고 null로 반환한다.
+        - 오늘, 내일, 모레, 내일모레와 다음 주의 요일은 기준 시각 정보에 적힌 날짜를 사용한다.
+        - 모레와 내일모레는 같은 날짜 표현이다.
+        - 사용자가 날짜를 말하지 않았다면 target_date 키를 반환하지 않는다.
         - 설명이나 마크다운을 붙이지 않는다.
 
         다음 형식의 JSON만 반환한다:
-        {{"extract_result": {{"필드명": "추출값 또는 null"}}}}
+        {{"extract_result": {{"target_date": "YYYY-MM-DD"}}}}
+        날짜를 말하지 않았다면 {{"extract_result": {{}}}}를 반환한다.
 
         사용자 요청: {user_text}
         """
@@ -423,23 +517,26 @@ async def extract_dayinfo_from_text(query_type: int, user_text: str, request_tim
     routine_prompt = (f"""
         역할: 사용자의 루틴 수정/삭제 요청에서 해당 루틴이 어느 요일에 속하는지 추출한다.
     
-        기준 시각: {request_time}
+        기준 시각 정보:
+        {time_reference}
         현재 단계에서 추출할 필드: days_of_week
     
         필드 형식:
-        - days_of_week: 0~6을 원소로 가지는 배열. 0=일, 1=월, 2=화, 3=수, 4=목, 5=금, 6=토
+        - days_of_week: 요일 이름으로 이루어진 JSON 문자열 배열
     
         규칙:
         - 반드시 "현재 단계에서 추출할 필드"에 있는 키만 처리한다.
-        - 오늘, 내일, 모레 같은 상대 날짜는 기준 시각으로 계산한다.
-        - 오전과 오후를 구분하여 24시간제로 변환한다.
-        - 매일은 [0,1,2,3,4,5,6], 평일은 [1,2,3,4,5], 주말은 [0,6]이다.
-        - “이번 주”는 이번 주 월요일 00:00:00부터 다음 주 월요일 00:00:00까지다.
-        - 사용자가 말하지 않은 값은 추측하지 말고 null로 반환한다.
+        - 오늘, 내일, 모레, 내일모레가 언급되면 기준 시각 정보의 요일 이름을 사용한다.
+        - 사용할 수 있는 값은 일요일, 월요일, 화요일, 수요일, 목요일, 금요일, 토요일이다.
+        - 평일은 월요일부터 금요일, 주말은 일요일과 토요일, 매일은 모든 요일을 반환한다.
+        - 화요일과 목요일은 ["화요일", "목요일"]처럼 JSON 문자열 배열로 반환한다.
+        - 배열 전체를 따옴표로 감싸지 않는다.
+        - 사용자가 요일을 말하지 않았다면 days_of_week 키를 반환하지 않는다.
         - 설명이나 마크다운을 붙이지 않는다.
     
         다음 형식의 JSON만 반환한다:
-        {{"extract_result": {{"필드명": "추출값 또는 null"}}}}
+        {{"extract_result": {{"days_of_week": ["화요일", "목요일"]}}}}
+        요일을 말하지 않았다면 {{"extract_result": {{}}}}를 반환한다.
     
         사용자 요청: {user_text}
         """
@@ -451,7 +548,8 @@ async def extract_dayinfo_from_text(query_type: int, user_text: str, request_tim
         "model": "qwen2.5-coder:7b",
         "prompt": prompt,
         "stream": False,
-        "format": "json"
+        "format": "json",
+        "options": {"temperature": 0}
     }
 
     try:
@@ -459,53 +557,66 @@ async def extract_dayinfo_from_text(query_type: int, user_text: str, request_tim
             response = await client.post(OLLAMA_URL, json=payload, timeout=30.0)
             if response.status_code == 200:
                 result_str = response.json().get("response", "{}")
-                extract_result = dict(json.loads(result_str).get("extract_result"))
-                return extract_result
+                extract_result = dict(
+                    json.loads(result_str).get("extract_result") or {}
+                )
+                return normalize_days_of_week(extract_result)
             print(f"Ollama 에러: {response.status_code}")
             return {"result": "extract fail"}
     except Exception as e:
         print(f"AI 라우팅 실패: {str(e)}")
         return {"result": "extract fail"}
 
-async def extract_update_parameters(query_type: int, user_text: str, required_args: list[str], request_time: str) -> dict:
+async def extract_update_parameters(
+    query_type: int,
+    user_text: str,
+    required_args: list[str],
+    request_time: str,
+    target_date: str | None = None,
+) -> dict:
+    extraction_mapping = parameter_extraction_mapping.get(query_type, {})
+    fields_to_extract = [field for field in required_args if field in extraction_mapping]
+    field_formats = "\n".join(
+        extraction_mapping[field][0]
+        for field in fields_to_extract
+    )
+    field_rules = "\n".join(dict.fromkeys(
+        rule
+        for field in fields_to_extract
+        for rule in extraction_mapping[field][1]
+    ))
+    time_reference = build_time_reference(request_time)
+    schedule_target_date = target_date or "제공되지 않음"
     prompt = (f"""
         역할: 사용자의 일정 요청에서 현재 단계에 필요한 필드만 추출한다.
-    
+
         쿼리 유형: {query_type}
-        기준 시각: {request_time}
-        현재 단계에서 추출할 필드: {required_args}
-    
+        기준 시각 정보:
+        {time_reference}
+        수정 대상 일정 날짜: {schedule_target_date}
+        반환이 허용된 후보 필드(모두 반환할 필요 없음): {fields_to_extract}
+
         쿼리 유형:
         4 = 일정 수정
         5 = 루틴 수정
-    
+
         필드 형식:
-        - 일정의 start_time, end_time: YYYY-MM-DD HH:MM:SS
-        - 루틴의 start_time, end_time: HH:MM:SS
-        - business: 일정 또는 루틴의 핵심 내용 문자열
-        - location: 장소 문자열
-        - who: 사람 이름 문자열 배열
-        - days_of_week: 0~6을 원소로 가지는 배열. 0=일, 1=월, 2=화, 3=수, 4=목, 5=금, 6=토
-        - start_date, end_date: YYYY-MM-DD
-    
+        {field_formats}
+
         규칙:
-        - 타겟팅 단계에서 target_date만 주어지면 기존 일정의 날짜만 추출한다.
-        - 타겟팅 단계에서 days_of_week만 주어지면 기존 루틴의 요일만 추출한다.
-        - 수정 단계에서는 전달된 수정 필드에 대해 사용자가 새로 바꾸려는 값만 추출한다.
+        {field_rules}
+        - 후보 필드는 반환 가능한 키 목록이며 모두 채워야 하는 필드 목록이 아니다.
+        - 반드시 "반환이 허용된 후보 필드"에 있는 키만 반환한다.
         - 기존 대상을 설명하는 값과 새로 변경할 값을 혼동하지 않는다.
-        - schedule_id와 routine_group_id는 사용자 문장으로 추측하거나 생성하지 않는다.
-        - 오늘, 내일, 모레 같은 상대 날짜는 기준 시각으로 계산한다.
-        - 오전과 오후를 구분하여 24시간제로 변환한다.
-        - 매일은 [0,1,2,3,4,5,6], 평일은 [1,2,3,4,5], 주말은 [0,6]이다.
-        - 기간 조회의 end_time은 조회에 포함되지 않는 종료 경계다.
-        - “이번 주”는 이번 주 월요일 00:00:00부터 다음 주 월요일 00:00:00까지다.
         - 사용자가 말하지 않은 값은 반환하지 않는다.
-        - 장소, 동반자, 종료 시각을 지우라는 요청은 해당 필드 값을 null로 반환한다.
+        - 삭제를 명시한 nullable 필드만 JSON null로 반환한다.
+        - null을 문자열 "null"로 반환하지 않는다.
         - 설명이나 마크다운을 붙이지 않는다.
-    
-        다음 형식의 JSON만 반환한다:
-        {{"extract_result": {{"필드명": "추출값 또는 null"}}}}
-    
+
+        extract_result 객체 안에 필드 형식에 맞는 JSON 값만 넣어 반환한다.
+        문자열은 JSON 문자열, 배열은 JSON 배열, 명시적 삭제는 JSON null로 반환한다.
+        추출할 수정값이 없다면 {{"extract_result": {{}}}}를 반환한다.
+
         사용자 요청: {user_text}
         """
         )
@@ -514,7 +625,8 @@ async def extract_update_parameters(query_type: int, user_text: str, required_ar
         "model": "qwen2.5-coder:7b",
         "prompt": prompt,
         "stream": False,
-        "format": "json"
+        "format": "json",
+        "options": {"temperature": 0}
     }
     
     try:
@@ -522,8 +634,19 @@ async def extract_update_parameters(query_type: int, user_text: str, required_ar
             response = await client.post(OLLAMA_URL, json=payload, timeout=30.0)
             if response.status_code == 200:
                 result_str = response.json().get("response", "{}")
-                extract_result = dict(json.loads(result_str).get("extract_result"))
-                return extract_result
+                extract_result = dict(
+                    json.loads(result_str).get("extract_result") or {}
+                )
+                extract_result = {
+                    key: value
+                    for key, value in extract_result.items()
+                    if key in fields_to_extract
+                    and not (
+                        isinstance(value, str)
+                        and value.strip().lower() == "null"
+                    )
+                }
+                return normalize_days_of_week(extract_result)
             print(f"Ollama 에러: {response.status_code}")
             return {"result": "extract fail"}
     except Exception as e:
@@ -947,7 +1070,13 @@ async def handle_schedule_update(query_context: query_context.ScheduleQueryConte
     if (query_context.pending_step == "waiting_parameters"):
         if not query_context.update_parameters:
             required_args = list(query_context.current_parameters.keys())
-            update_args = await extract_update_parameters(query_type, user_text, required_args, request_time,)
+            update_args = await extract_update_parameters(
+                query_type,
+                user_text,
+                required_args,
+                request_time,
+                query_context.targeting_parameters.get("target_date"),
+            )
             if update_args.get("result") == "extract fail":
                 query_context.response_message = "요청 내용을 분석하지 못했습니다. 다시 말씀해주세요."
                 return query_context
