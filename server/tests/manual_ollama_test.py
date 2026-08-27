@@ -1,7 +1,16 @@
+# 실행 방법 (프로젝트 루트에서): python server/tests/manual_ollama_test.py
+# 실행 전 Ollama와 qwen2.5-coder:7b 모델이 실행 중이어야 합니다.
+
 import asyncio
 import json
+import sys
 from datetime import datetime
 from pathlib import Path
+
+# 이 파일을 어느 작업 디렉터리에서 실행해도 server/service를 import할 수 있게 합니다.
+SERVER_DIR = Path(__file__).resolve().parents[1]
+if str(SERVER_DIR) not in sys.path:
+    sys.path.insert(0, str(SERVER_DIR))
 
 from service.query_context import (
     DIRECT_PARAMETER_SPECS,
@@ -23,7 +32,7 @@ FUNCTIONS = {
     "4": "extract_update_parameters",
 }
 
-TEST_CASES_PATH = Path(__file__).with_name("ollama_test_cases.json")
+TEST_CASES_PATH = Path(__file__).resolve().with_name("ollama_test_cases.json")
 
 
 def format_spec(spec: dict, allow_partial: bool = False) -> str:

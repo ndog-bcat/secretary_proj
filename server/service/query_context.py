@@ -39,8 +39,10 @@ parameter_request_mapping = {
         "format_back": "알려주세요."
         },
     2: {
-        "start_time": ["시작 날짜·시간", "과 ", "을 "],
-        "end_time": ["종료 날짜·시간", "과 ", "을 "],
+        "start_date": ["시작 날짜", "와 ", "를 "],
+        "end_date": ["종료 날짜", "와 ", "를 "],
+        "start_clock": ["시작 시간", "과 ", "을 "],
+        "end_clock": ["종료 시간", "과 ", "을 "],
         "business": ["내용", "과 ", "을 "],
         "location": ["장소", "와 ", "를 "],
         "who": ["함께하는 사람", "과 ", "을 "],
@@ -60,8 +62,10 @@ parameter_request_mapping = {
         "format_back": "알려주세요."
         },
     4: {
-        "start_time": ["시작 날짜·시간", "과 ", "이 "],
-        "end_time": ["종료 날짜·시간", "과 ", "이 "],
+        "start_date": ["시작 날짜", "와 ", "가 "],
+        "end_date": ["종료 날짜", "와 ", "가 "],
+        "start_clock": ["시작 시간", "과 ", "이 "],
+        "end_clock": ["종료 시간", "과 ", "이 "],
         "business": ["내용", "과 ", "이 "],
         "location": ["장소", "와 ", "가 "],
         "who": ["함께하는 사람", "과 ", "이 "],
@@ -117,20 +121,36 @@ parameter_extraction_mapping = {
         ],
     },
     2: {
-        "start_time": [
-            "- start_time: YYYY-MM-DD HH:MM:SS",
+        "start_date": [
+            "- start_date: YYYY-MM-DD",
             [
-                "- start_time에는 일정의 시작 날짜와 시각을 반환한다.",
+                "- 사용자가 일정의 시작 날짜를 말한 경우에만 start_date를 반환한다.",
+                "- start_date에는 일정의 시작 날짜만 반환하며 시각을 붙이지 않는다.",
                 "- 오늘, 내일, 모레, 내일모레는 기준 시각 정보에 적힌 날짜를 사용한다.",
                 "- 연도를 말하지 않았다면 기준 시각 정보의 연도를 사용한다.",
+            ],
+        ],
+        "end_date": [
+            "- end_date: YYYY-MM-DD",
+            [
+                "- 사용자가 일정의 종료 날짜를 직접 말한 경우에만 end_date를 반환한다.",
+                "- end_date에는 일정의 종료 날짜만 반환하며 시각을 붙이지 않는다.",
+                "- 종료 날짜를 말하지 않았다면 end_date를 반환하지 않는다.",
+            ],
+        ],
+        "start_clock": [
+            "- start_clock: HH:MM:SS",
+            [
+                "- 사용자가 일정의 시작 시각을 말한 경우에만 start_clock을 반환한다.",
+                "- start_clock에는 일정의 시작 시각만 반환하며 날짜를 붙이지 않는다.",
                 "- 오전과 오후를 구분하여 24시간제로 반환한다.",
             ],
         ],
-        "end_time": [
-            "- end_time: YYYY-MM-DD HH:MM:SS",
+        "end_clock": [
+            "- end_clock: HH:MM:SS",
             [
-                "- end_time에는 일정의 종료 날짜와 시각을 반환한다.",
-                "- 종료 날짜를 따로 말하지 않았다면 일정 시작 날짜를 사용한다.",
+                "- 사용자가 일정의 종료 시각을 말한 경우에만 end_clock을 반환한다.",
+                "- end_clock에는 일정의 종료 시각만 반환하며 날짜를 붙이지 않는다.",
                 "- 오전과 오후를 구분하여 24시간제로 반환한다.",
             ],
         ],
@@ -224,25 +244,44 @@ parameter_extraction_mapping = {
         ],
     },
     4: {
-        "start_time": [
-            "- start_time: YYYY-MM-DD HH:MM:SS",
+        "start_date": [
+            "- start_date: YYYY-MM-DD",
             [
-                "- start_time에는 새로 변경할 일정 시작 날짜와 시각만 반환한다.",
-                "- '시간을 오후 4시로 바꾼다'처럼 종료 시각을 따로 말하지 않은 일정 시간 변경은 start_time이다.",
-                "- 날짜를 말하지 않고 수정 대상 일정 날짜가 제공됐다면 그 날짜를 사용한다.",
+                "- 사용자가 새 시작 날짜를 말한 경우에만 start_date를 반환한다.",
+                "- start_date에는 새로 변경할 일정 시작 날짜만 반환한다.",
+                "- '날짜를 내일로 바꾼다'처럼 종료 날짜를 따로 말하지 않은 일정 날짜 변경은 start_date이다.",
                 "- 오늘, 내일, 모레, 내일모레는 기준 시각 정보에 적힌 날짜를 사용한다.",
-                "- 오전과 오후를 구분하여 24시간제로 반환한다.",
-                "- 기존 일정을 설명하는 시각은 start_time으로 반환하지 않는다.",
-                "- start_time은 삭제할 수 없으므로 null로 반환하지 않는다.",
+                "- 기존 일정을 설명하는 날짜는 start_date로 반환하지 않는다.",
+                "- start_date는 삭제할 수 없으므로 null로 반환하지 않는다.",
             ],
         ],
-        "end_time": [
-            "- end_time: YYYY-MM-DD HH:MM:SS 또는 null",
+        "end_date": [
+            "- end_date: YYYY-MM-DD 또는 null",
             [
-                "- end_time에는 새로 변경할 일정 종료 날짜와 시각만 반환한다.",
-                "- 날짜를 말하지 않고 수정 대상 일정 날짜가 제공됐다면 그 날짜를 사용한다.",
-                "- 종료 시각을 없애거나 지우라는 요청에는 end_time을 null로 반환한다.",
-                "- 기존 일정을 설명하는 시각은 end_time으로 반환하지 않는다.",
+                "- 사용자가 새 종료 날짜를 말하거나 종료 날짜 삭제를 명시한 경우에만 end_date를 반환한다.",
+                "- end_date에는 새로 변경할 일정 종료 날짜만 반환한다.",
+                "- 종료 날짜를 없애거나 지우라는 요청에는 end_date를 null로 반환한다.",
+                "- 기존 일정을 설명하는 날짜는 end_date로 반환하지 않는다.",
+            ],
+        ],
+        "start_clock": [
+            "- start_clock: HH:MM:SS",
+            [
+                "- 사용자가 새 시작 시각을 말한 경우에만 start_clock을 반환한다.",
+                "- start_clock에는 새로 변경할 일정 시작 시각만 반환한다.",
+                "- '시간을 오후 4시로 바꾼다'처럼 종료 시각을 따로 말하지 않은 일정 시간 변경은 start_clock이다.",
+                "- 오전과 오후를 구분하여 24시간제로 반환한다.",
+                "- 기존 일정을 설명하는 시각은 start_clock으로 반환하지 않는다.",
+                "- start_clock은 삭제할 수 없으므로 null로 반환하지 않는다.",
+            ],
+        ],
+        "end_clock": [
+            "- end_clock: HH:MM:SS 또는 null",
+            [
+                "- 사용자가 새 종료 시각을 말하거나 종료 시각 삭제를 명시한 경우에만 end_clock을 반환한다.",
+                "- end_clock에는 새로 변경할 일정 종료 시각만 반환한다.",
+                "- 종료 시각을 없애거나 지우라는 요청에는 end_clock을 null로 반환한다.",
+                "- 기존 일정을 설명하는 시각은 end_clock으로 반환하지 않는다.",
             ],
         ],
         "business": [
@@ -350,8 +389,10 @@ parameter_templates = {
     1: {"start_time": None,
         "end_time": None},
     2: {
-        "start_time": None,
-        "end_time": None,
+        "start_date": None,
+        "start_clock": None,
+        "end_date": None,
+        "end_clock": None,
         "business": None,
         "location": None,
         "who": None
@@ -369,8 +410,10 @@ parameter_templates = {
         },
     4: {
         "schedule_id": None,
-        "start_time": None,
-        "end_time": None,
+        "start_date": None,
+        "start_clock": None,
+        "end_date": None,
+        "end_clock": None,
         "business": None,
         "location": None,
         "who": None
@@ -394,9 +437,9 @@ parameter_templates = {
 mandatory_parameters = {
     0: ["target_date"],
     1: [],
-    2: ["start_time", "business"],
+    2: ["start_date", "start_clock", "business"],
     3: ["start_time", "business", "days_of_week"],
-    4: ["schedule_id", "start_time", "business"],
+    4: ["schedule_id", "start_date", "start_clock", "business"],
     5: ["routine_group_id", "start_time", "business", "days_of_week"],
     6: ["schedule_id"],
     7: ["routine_group_id"]
@@ -406,9 +449,9 @@ mandatory_parameters = {
 optional_parameters = {
     0: [],
     1: ["start_time", "end_time"],
-    2: ["end_time", "location", "who"],
+    2: ["end_date", "end_clock", "location", "who"],
     3: ["end_time", "location", "who", "start_date", "end_date"],
-    4: ["end_time", "location", "who"],
+    4: ["end_date", "end_clock", "location", "who"],
     5: ["end_time", "location", "who", "start_date", "end_date"],
     6: [],
     7: []

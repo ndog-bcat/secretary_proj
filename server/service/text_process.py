@@ -350,6 +350,84 @@ async def update_current_parameters(query_type: int, user_text: str, required_ar
                 current_parameters[key] = extracted_parameters[key]
         return 1
 
+def assemble_schedule_insert_parameters(parameters: dict) -> dict:
+    """분리 추출한 일정 날짜·시각을 DB 호출 형식으로 조립합니다."""
+    start_time = f"{parameters['start_date']} {parameters['start_clock']}"
+
+    end_time = None
+    if parameters.get("end_clock") is not None:
+        end_date = parameters.get("end_date") or parameters["start_date"]
+        end_time = f"{end_date} {parameters['end_clock']}"
+
+    return {
+        "start_time": start_time,
+        "end_time": end_time,
+        "business": parameters["business"],
+        "location": parameters.get("location"),
+        "who": parameters.get("who"),
+    }
+
+def assemble_schedule_update_parameters(target_schedule: dict, update_parameters: dict) -> dict:
+    """기존 일정과 분리 추출한 수정값을 합쳐 DB 호출 형식으로 조립합니다."""
+    old_start = db_process.parse_to_datetime(target_schedule["start_time"])
+    start_date = update_parameters.get(
+        "start_date",
+        old_start.date().isoformat(),
+    )
+    start_clock = update_parameters.get(
+        "start_clock",
+        old_start.time().strftime("%H:%M:%S"),
+    )
+    start_time = f"{start_date} {start_clock}"
+
+    old_end_value = target_schedule.get("end_time")
+    old_end = (
+        None
+        if old_end_value is None
+        else db_process.parse_to_datetime(old_end_value)
+    )
+
+    if "end_clock" in update_parameters and update_parameters["end_clock"] is None:
+        end_time = None
+    elif old_end is None and "end_clock" not in update_parameters:
+        end_time = None
+    else:
+        if "end_date" in update_parameters:
+            end_date = update_parameters["end_date"] or start_date
+        elif old_end is not None:
+            end_date = old_end.date().isoformat()
+        else:
+            end_date = start_date
+
+        if "end_clock" in update_parameters:
+            end_clock = update_parameters["end_clock"]
+        elif old_end is not None:
+            end_clock = old_end.time().strftime("%H:%M:%S")
+        else:
+            end_clock = None
+
+        end_time = None if end_clock is None else f"{end_date} {end_clock}"
+
+    return {
+        "schedule_id": target_schedule["Schedule_ID"],
+        "start_time": start_time,
+        "end_time": end_time,
+        "business": update_parameters.get(
+            "business",
+            target_schedule["business"],
+        ),
+        "location": (
+            update_parameters["location"]
+            if "location" in update_parameters
+            else target_schedule.get("location")
+        ),
+        "who": (
+            update_parameters["who"]
+            if "who" in update_parameters
+            else target_schedule.get("who")
+        ),
+    }
+
 def routine_occurs_on(routine: dict, occurrence_date) -> bool:
     days_of_week = routine.get("days_of_week")
     if days_of_week is None:
@@ -829,8 +907,7 @@ async def handle_day_query(query_context: query_context.ScheduleQueryContext):
             query_context.response_message = await parameter_request_message(query_context.query_type, missing_args)
             return query_context
         # 2. DB 조회
-        else:
-            db_result = await db_process.process_db_query(user_id, query_type, query_context.current_parameters)
+        db_result = await db_process.process_db_query(user_id, query_type, query_context.current_parameters)
     # 3. 조회 성공 or 실패 답변 반환
     query_context.response_message = await create_final_response(db_result, query_context.query_type)
     query_context.pending_step = "done"
@@ -886,6 +963,10 @@ async def handle_schedule_insert(query_context: query_context.ScheduleQueryConte
         if (len(missing_args) > 0):
             query_context.response_message = await parameter_request_message(query_context.query_type, missing_args)
             return query_context
+
+        query_context.current_parameters = assemble_schedule_insert_parameters(
+            query_context.current_parameters
+        )
 
     if (query_context.pending_step == "waiting_collision_decision"):
         decision = user_text.strip().replace(" ", "")
@@ -1050,26 +1131,19 @@ async def handle_schedule_update(query_context: query_context.ScheduleQueryConte
         else:
             target_schedule = query_context.target_candidates[candidate_index]
             query_context.selected_targets = [target_schedule]
-            query_context.current_parameters = {
-                "schedule_id": target_schedule["Schedule_ID"],
-                "start_time": target_schedule["start_time"],
-                "end_time": target_schedule.get("end_time"),
-                "business": target_schedule["business"],
-                "location": target_schedule.get("location"),
-                "who": target_schedule.get("who"),
-            }
-            for key, value in query_context.update_parameters.items():
-                if key in query_context.current_parameters and key != "schedule_id":
-                    query_context.current_parameters[key] = value
-
             if not query_context.update_parameters:
                 query_context.response_message = "수정할 정보를 말씀해주세요."
                 query_context.pending_step = "waiting_parameters"
                 return query_context
+
+            query_context.current_parameters = assemble_schedule_update_parameters(
+                target_schedule,
+                query_context.update_parameters,
+            )
     # 2. 인자 확인
     if (query_context.pending_step == "waiting_parameters"):
         if not query_context.update_parameters:
-            required_args = list(query_context.current_parameters.keys())
+            required_args = list(parameter_extraction_mapping[query_type].keys())
             update_args = await extract_update_parameters(
                 query_type,
                 user_text,
@@ -1081,17 +1155,20 @@ async def handle_schedule_update(query_context: query_context.ScheduleQueryConte
                 query_context.response_message = "요청 내용을 분석하지 못했습니다. 다시 말씀해주세요."
                 return query_context
 
-            for key, value in update_args.items():
-                if (key in query_context.current_parameters and key != "schedule_id"):
-                    query_context.update_parameters[key] = value
+            query_context.update_parameters = {
+                key: value
+                for key, value in update_args.items()
+                if key in parameter_extraction_mapping[query_type]
+            }
 
         if not query_context.update_parameters:
             query_context.response_message = "수정할 정보를 말씀해주세요."
             return query_context
 
-        for key, value in query_context.update_parameters.items():
-            if key in query_context.current_parameters and key != "schedule_id":
-                query_context.current_parameters[key] = value
+        query_context.current_parameters = assemble_schedule_update_parameters(
+            query_context.selected_targets[0],
+            query_context.update_parameters,
+        )
     # 3. 수정튜플 충돌검사
     if (query_context.pending_step == "waiting_collision_decision"):
         decision = user_text.strip().replace(" ", "")
@@ -1346,10 +1423,12 @@ async def handle_schedule_delete(query_context: query_context.ScheduleQueryConte
         query_context.current_parameters = {"schedule_id": target_schedule["Schedule_ID"]}
 
     db_result = await db_process.process_db_query(user_id, query_type, query_context.current_parameters)
-    if db_result.get("status") == "success":
-        query_context.response_message = "일정 삭제에 성공하였습니다."
-    else:
+    if db_result.get("status") != "success":
         query_context.response_message = "db 오류로 인해 일정 삭제에 실패하였습니다."
+    elif db_result.get("data", {}).get("affected_rows", 0) == 0:
+        query_context.response_message = "삭제할 일정을 찾지 못했습니다."
+    else:
+        query_context.response_message = "일정 삭제에 성공하였습니다."
     query_context.pending_step = "done"
     return query_context
 
@@ -1418,9 +1497,11 @@ async def handle_routine_delete(query_context: query_context.ScheduleQueryContex
         query_context.current_parameters = {"routine_group_id": target_routine["Routine_Group_ID"]}
 
     db_result = await db_process.process_db_query(user_id, query_type, query_context.current_parameters)
-    if db_result.get("status") == "success":
-        query_context.response_message = "루틴 삭제에 성공하였습니다."
-    else:
+    if db_result.get("status") != "success":
         query_context.response_message = "db 오류로 인해 루틴 삭제에 실패하였습니다."
+    elif db_result.get("data", {}).get("affected_rows", 0) == 0:
+        query_context.response_message = "삭제할 루틴을 찾지 못했습니다."
+    else:
+        query_context.response_message = "루틴 삭제에 성공하였습니다."
     query_context.pending_step = "done"
     return query_context

@@ -32,13 +32,13 @@ class CurrentHandlerFlowTests(unittest.IsolatedAsyncioTestCase):
     async def test_parameter_request_separates_required_and_optional_fields(self):
         message = await text_process.parameter_request_message(
             2,
-            ["business", "end_time", "location", "who"],
+            ["business", "end_date", "end_clock", "location", "who"],
         )
 
         self.assertEqual(
             message,
             "추가할 일정의 내용을 알려주세요. "
-            "종료 날짜·시간, 장소, 함께하는 사람도 있다면 함께 알려주세요.",
+            "종료 날짜, 종료 시간, 장소, 함께하는 사람도 있다면 함께 알려주세요.",
         )
 
     async def test_routine_parameter_request_uses_user_facing_names(self):
@@ -145,7 +145,8 @@ class CurrentHandlerFlowTests(unittest.IsolatedAsyncioTestCase):
                 text_process,
                 "extract_parameters_from_text",
                 new=AsyncMock(return_value={
-                    "start_time": "2026-08-19 14:00:00",
+                    "start_date": "2026-08-19",
+                    "start_clock": "14:00:00",
                     "business": "meeting",
                     "unknown": "ignored",
                 }),
@@ -164,12 +165,77 @@ class CurrentHandlerFlowTests(unittest.IsolatedAsyncioTestCase):
             result = await text_process.handle_schedule_insert(context)
 
         self.assertEqual(result.pending_step, "done")
+        self.assertEqual(
+            result.current_parameters["start_time"],
+            "2026-08-19 14:00:00",
+        )
+        self.assertIsNone(result.current_parameters["end_time"])
         self.assertEqual(result.current_parameters["business"], "meeting")
+        self.assertNotIn("start_date", result.current_parameters)
+        self.assertNotIn("start_clock", result.current_parameters)
         self.assertNotIn("unknown", result.current_parameters)
         process_db_mock.assert_awaited_once_with(
             "user-1",
             2,
             result.current_parameters,
+        )
+
+    async def test_schedule_insert_waits_for_clock_then_assembles_followup(self):
+        context = query_context.ScheduleQueryContext(
+            user_id="user-1",
+            request_time="2026-08-18 09:00:00",
+            user_text="내일 회의 추가해줘",
+            query_type=2,
+            pending_step="waiting_parameters",
+            current_parameters=deepcopy(query_context.parameter_templates[2]),
+        )
+        extract_mock = AsyncMock(side_effect=[
+            {
+                "start_date": "2026-08-19",
+                "business": "회의",
+            },
+            {"start_clock": "15:00:00"},
+        ])
+        collision_mock = AsyncMock(return_value=[])
+        process_db_mock = AsyncMock(return_value={"status": "success"})
+
+        with (
+            patch.object(
+                text_process,
+                "extract_parameters_from_text",
+                new=extract_mock,
+            ),
+            patch.object(
+                text_process,
+                "get_collision",
+                new=collision_mock,
+            ),
+            patch.object(
+                text_process.db_process,
+                "process_db_query",
+                new=process_db_mock,
+            ),
+        ):
+            first_result = await text_process.handle_schedule_insert(context)
+
+            self.assertEqual(first_result.pending_step, "waiting_parameters")
+            self.assertIn("시작 시간", first_result.response_message)
+            collision_mock.assert_not_awaited()
+            process_db_mock.assert_not_awaited()
+
+            context.user_text = "오후 3시"
+            final_result = await text_process.handle_schedule_insert(context)
+
+        self.assertEqual(final_result.pending_step, "done")
+        self.assertEqual(
+            final_result.current_parameters["start_time"],
+            "2026-08-19 15:00:00",
+        )
+        collision_mock.assert_awaited_once()
+        process_db_mock.assert_awaited_once_with(
+            "user-1",
+            2,
+            final_result.current_parameters,
         )
 
     async def test_routine_insert_generates_group_id_and_reaches_db(self):
@@ -237,7 +303,7 @@ class CurrentHandlerFlowTests(unittest.IsolatedAsyncioTestCase):
                 text_process,
                 "extract_update_parameters",
                 new=AsyncMock(return_value={
-                    "start_time": "2026-08-19 15:00:00",
+                    "start_clock": "15:00:00",
                     "location": None,
                 }),
             ),
@@ -265,7 +331,7 @@ class CurrentHandlerFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             first_result.update_parameters,
             {
-                "start_time": "2026-08-19 15:00:00",
+                "start_clock": "15:00:00",
                 "location": None,
             },
         )
@@ -400,21 +466,37 @@ class CurrentOllamaContractTests(unittest.IsolatedAsyncioTestCase):
 
 
 class ScheduleUpdateAssemblyTests(unittest.IsolatedAsyncioTestCase):
+    def test_schedule_insert_uses_start_date_when_end_date_is_missing(self):
+        result = text_process.assemble_schedule_insert_parameters({
+            "start_date": "2026-08-28",
+            "start_clock": "10:00:00",
+            "end_date": None,
+            "end_clock": "11:00:00",
+            "business": "회의",
+            "location": None,
+            "who": None,
+        })
+
+        self.assertEqual(result["start_time"], "2026-08-28 10:00:00")
+        self.assertEqual(result["end_time"], "2026-08-28 11:00:00")
+
     async def test_waiting_parameters_skips_extraction_when_update_already_exists(self):
+        target = {
+            "Schedule_ID": 10,
+            "start_time": "2026-08-18 10:00:00",
+            "end_time": None,
+            "business": "회의",
+            "location": "회사",
+            "who": None,
+        }
         context = query_context.ScheduleQueryContext(
             user_id="user-1",
             request_time="2026-08-17 09:00:00",
             user_text="이전 단계 응답",
             query_type=4,
             pending_step="waiting_parameters",
-            current_parameters={
-                "schedule_id": 10,
-                "start_time": "2026-08-18 10:00:00",
-                "end_time": None,
-                "business": "회의",
-                "location": "회사",
-                "who": None,
-            },
+            current_parameters=deepcopy(query_context.parameter_templates[4]),
+            selected_targets=[target],
             update_parameters={"location": "홍대"},
         )
         extract_mock = AsyncMock(return_value={"business": "잘못된 추출"})
@@ -444,20 +526,22 @@ class ScheduleUpdateAssemblyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.current_parameters["business"], "회의")
 
     async def test_waiting_parameters_extracts_and_applies_update_values(self):
+        target = {
+            "Schedule_ID": 10,
+            "start_time": "2026-08-18 10:00:00",
+            "end_time": None,
+            "business": "회의",
+            "location": "회사",
+            "who": None,
+        }
         context = query_context.ScheduleQueryContext(
             user_id="user-1",
             request_time="2026-08-17 09:00:00",
             user_text="장소를 홍대로 바꿔줘",
             query_type=4,
             pending_step="waiting_parameters",
-            current_parameters={
-                "schedule_id": 10,
-                "start_time": "2026-08-18 10:00:00",
-                "end_time": None,
-                "business": "회의",
-                "location": "회사",
-                "who": None,
-            },
+            current_parameters=deepcopy(query_context.parameter_templates[4]),
+            selected_targets=[target],
         )
 
         with (
@@ -484,20 +568,22 @@ class ScheduleUpdateAssemblyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.current_parameters["location"], "홍대")
 
     async def test_waiting_parameters_reasks_when_no_update_value_is_found(self):
+        target = {
+            "Schedule_ID": 10,
+            "start_time": "2026-08-18 10:00:00",
+            "end_time": None,
+            "business": "회의",
+            "location": None,
+            "who": None,
+        }
         context = query_context.ScheduleQueryContext(
             user_id="user-1",
             request_time="2026-08-17 09:00:00",
             user_text="잘 모르겠어",
             query_type=4,
             pending_step="waiting_parameters",
-            current_parameters={
-                "schedule_id": 10,
-                "start_time": "2026-08-18 10:00:00",
-                "end_time": None,
-                "business": "회의",
-                "location": None,
-                "who": None,
-            },
+            current_parameters=deepcopy(query_context.parameter_templates[4]),
+            selected_targets=[target],
         )
 
         with patch.object(
@@ -528,7 +614,7 @@ class ScheduleUpdateAssemblyTests(unittest.IsolatedAsyncioTestCase):
             pending_step="waiting_target",
             target_candidates=[target],
             update_parameters={
-                "start_time": "2026-08-18 11:00:00",
+                "start_clock": "11:00:00",
                 "location": None,
             },
         )
@@ -580,8 +666,81 @@ class ScheduleUpdateAssemblyTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result.pending_step, "waiting_parameters")
         self.assertEqual(result.response_message, "수정할 정보를 말씀해주세요.")
-        self.assertEqual(result.current_parameters["schedule_id"], 10)
-        self.assertIsNone(result.current_parameters["end_time"])
+        self.assertEqual(result.selected_targets, [target])
+        self.assertEqual(result.current_parameters, {})
+
+    def test_schedule_update_assembles_date_only_change(self):
+        target = {
+            "Schedule_ID": 10,
+            "start_time": "2026-08-18 10:00:00",
+            "end_time": "2026-08-18 11:00:00",
+            "business": "회의",
+            "location": None,
+            "who": None,
+        }
+
+        result = text_process.assemble_schedule_update_parameters(
+            target,
+            {"start_date": "2026-08-20"},
+        )
+
+        self.assertEqual(result["start_time"], "2026-08-20 10:00:00")
+        self.assertEqual(result["end_time"], "2026-08-18 11:00:00")
+
+    def test_schedule_update_assembles_date_and_clock_change(self):
+        target = {
+            "Schedule_ID": 10,
+            "start_time": "2026-08-18 10:00:00",
+            "end_time": None,
+            "business": "회의",
+            "location": None,
+            "who": None,
+        }
+
+        result = text_process.assemble_schedule_update_parameters(
+            target,
+            {
+                "start_date": "2026-08-20",
+                "start_clock": "15:30:00",
+            },
+        )
+
+        self.assertEqual(result["start_time"], "2026-08-20 15:30:00")
+
+    def test_schedule_update_assembles_end_date_and_clock_parts(self):
+        target = {
+            "Schedule_ID": 10,
+            "start_time": "2026-08-18 10:00:00",
+            "end_time": "2026-08-18 11:00:00",
+            "business": "회의",
+            "location": None,
+            "who": None,
+        }
+        cases = [
+            (
+                {"end_date": "2026-08-20"},
+                "2026-08-20 11:00:00",
+            ),
+            (
+                {"end_clock": "12:30:00"},
+                "2026-08-18 12:30:00",
+            ),
+            (
+                {
+                    "end_date": "2026-08-20",
+                    "end_clock": "12:30:00",
+                },
+                "2026-08-20 12:30:00",
+            ),
+        ]
+
+        for updates, expected in cases:
+            with self.subTest(updates=updates):
+                result = text_process.assemble_schedule_update_parameters(
+                    target,
+                    updates,
+                )
+                self.assertEqual(result["end_time"], expected)
 
 
 class RoutineUpdateAssemblyTests(unittest.IsolatedAsyncioTestCase):
@@ -729,11 +888,18 @@ class DeleteHandlerTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(
             text_process.db_process,
             "process_db_query",
-            new=AsyncMock(return_value={"status": "success"}),
+            new=AsyncMock(return_value={
+                "status": "success",
+                "data": {"affected_rows": 1},
+            }),
         ) as process_db_mock:
             final_result = await text_process.handle_schedule_delete(context)
 
         self.assertEqual(final_result.pending_step, "done")
+        self.assertEqual(
+            final_result.response_message,
+            "일정 삭제에 성공하였습니다.",
+        )
         self.assertEqual(final_result.current_parameters, {"schedule_id": 20})
         process_db_mock.assert_awaited_once_with(
             "user-1",
@@ -802,11 +968,18 @@ class DeleteHandlerTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(
             text_process.db_process,
             "process_db_query",
-            new=AsyncMock(return_value={"status": "success"}),
+            new=AsyncMock(return_value={
+                "status": "success",
+                "data": {"affected_rows": 2},
+            }),
         ) as process_db_mock:
             final_result = await text_process.handle_routine_delete(context)
 
         self.assertEqual(final_result.pending_step, "done")
+        self.assertEqual(
+            final_result.response_message,
+            "루틴 삭제에 성공하였습니다.",
+        )
         self.assertEqual(
             final_result.current_parameters,
             {"routine_group_id": "group-10"},
@@ -815,6 +988,58 @@ class DeleteHandlerTests(unittest.IsolatedAsyncioTestCase):
             "user-1",
             7,
             {"routine_group_id": "group-10"},
+        )
+
+    async def test_schedule_delete_reports_missing_target_when_no_row_changed(self):
+        context = query_context.ScheduleQueryContext(
+            user_id="user-1",
+            request_time="2026-08-17 09:00:00",
+            user_text="1번",
+            query_type=6,
+            pending_step="waiting_target",
+            target_candidates=[{"Schedule_ID": 20}],
+        )
+
+        with patch.object(
+            text_process.db_process,
+            "process_db_query",
+            new=AsyncMock(return_value={
+                "status": "success",
+                "data": {"affected_rows": 0},
+            }),
+        ):
+            result = await text_process.handle_schedule_delete(context)
+
+        self.assertEqual(result.pending_step, "done")
+        self.assertEqual(
+            result.response_message,
+            "삭제할 일정을 찾지 못했습니다.",
+        )
+
+    async def test_routine_delete_reports_missing_target_when_no_row_changed(self):
+        context = query_context.ScheduleQueryContext(
+            user_id="user-1",
+            request_time="2026-08-17 09:00:00",
+            user_text="1번",
+            query_type=7,
+            pending_step="waiting_target",
+            target_candidates=[{"Routine_Group_ID": "group-10"}],
+        )
+
+        with patch.object(
+            text_process.db_process,
+            "process_db_query",
+            new=AsyncMock(return_value={
+                "status": "success",
+                "data": {"affected_rows": 0},
+            }),
+        ):
+            result = await text_process.handle_routine_delete(context)
+
+        self.assertEqual(result.pending_step, "done")
+        self.assertEqual(
+            result.response_message,
+            "삭제할 루틴을 찾지 못했습니다.",
         )
 
 
